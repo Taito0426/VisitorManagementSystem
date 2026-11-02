@@ -1,0 +1,780 @@
+════════════════════════════════════════════════════════════════════
+  来館者記録管理システム（VisitorManagementSystem）  プログラム構成と役割
+════════════════════════════════════════════════════════════════════
+  技術スタック  : WinForms + ASP.NET Core / .NET 10 / Dapper
+  データベース  : SQL Server Express ／ Azure SQL Database（設定で切替）
+  アーキテクチャ: レイヤード（Core / Application / Infrastructure / UI）＋ DI合成
+  接続先        : Server=.\SQLEXPRESS;Database=VisitorMgmt
+                  （デモ版のみ Database=VisitorMgmtDemo）
+  設計の正本    : 来館者記録管理システム_詳細設計書.docx（版数2.7）
+
+
+────────────────────────────────────────────────────────────────────
+  目次
+────────────────────────────────────────────────────────────────────
+   1. VisitorManagement.Core                    中核層（モデル・契約・業務ルール）
+   2. VisitorManagement.Application             アプリケーション層（業務ロジック）
+   3. VisitorManagement.Infrastructure.Data     インフラ層（DBアクセス共通）
+   4. Infrastructure.Data.SqlExpress / .AzureSql  DB方式ごとの差分実装
+   5. VisitorManagement.Infrastructure.Mail     メール送信
+   6. VisitorManagement.Infrastructure.Printing QRコード生成・ラベル印刷
+   7. VisitorManagement.Composition             DI合成（Provider切替）
+   8. VisitorManagement.WinFormsApp             管理アプリ（画面1〜7）
+   9. VisitorManagement.WebReception            受付Web/API（画面8〜9）
+  10. VisitorManagement.BatchRunner             定時バッチ
+  11. VisitorManagement.Tests                   テスト（xUnit）
+  12. db / scripts / docs                       スキーマ・運用スクリプト・文書
+  13. 編集ガイド（◯◯を変えたい時はどこを触るか）
+  14. ログ管理
+  15. 補足
+
+
+════════════════════════════════════════════════════════════════════
+  ★ 本システムの中核：DB切替アーキテクチャ（設計書 4章）
+════════════════════════════════════════════════════════════════════
+  appsettings.json の Database:Provider を書き換えて再起動するだけで、
+  SQL Server Express（オンプレ版）と Azure SQL Database（クラウド版）を
+  切り替えられる。ビルドの出し分けは行わず、同一バイナリで両対応する。
+
+    { "Database": { "Provider": "SqlExpress" } }   // "SqlExpress" | "AzureSql"
+
+  切り替わるのは次の4種類の実装のみで、Repository層のSQL文・業務ロジック・
+  画面はすべて共通コードである（差分の局所化）。
+
+    IDbConnectionFactory   SqlExpressConnectionFactory  / AzureSqlConnectionFactory
+    IDbRetryPolicy         NoRetryPolicy                / AzureSqlRetryPolicy
+    IBackupService         SqlExpressBackupService      / AzureSqlBackupService
+    IArchiveStorage        LocalArchiveStorage          / AzureBlobArchiveStorage
+
+  ★切替の登録は VisitorManagement.Composition\ServiceCollectionExtensions.cs
+    の AddDatabaseProvider ここ1か所。
+
+
+════════════════════════════════════════════════════════════════════
+  1. VisitorManagement.Core         ── 中核層
+                                       他層に依存しない。業務の中核モデル
+════════════════════════════════════════════════════════════════════
+
+  ■ Entities（テーブルに対応するエンティティ・設計書 9.2節）
+  ----------------------------------------------------------------
+  Site.cs           拠点マスタ（Sites）。拠点名・住所・ラベル印刷用の表示社名/
+                    ロゴ画像/ラベルサイズ区分・有効フラグ。
+                    Entryプランは1件のみ、Standard以上で複数拠点を横断管理。
+  Operator.cs       操作ユーザー（Operators）。ログインID・パスワードハッシュ・
+                    表示名・メール・権限ロール・所属拠点。
+                    ★RoleType と SiteId は登録時必須（NULL不可）。
+  Visitor.cs        来館予約（Visitors）。1予約に代表者1名＋同行者を
+                    ReservationGroupId で束ねる。IsRepresentative で区別。
+                    ステータス（未入館/入館中/退館済/キャンセル）・
+                    予約種別（事前予約/当日受付）・RowVersion（楽観的排他）。
+  QrToken.cs        QRトークン（QRTokens）。★1予約につき1行のみ、代表者の
+                    VisitorId に紐づく。TokenValue(GUID)・有効期限・
+                    UsedCount(読取回数 0/1/2)・ReissueCount(再送回数)・有効フラグ。
+  AccessLog.cs      入退館履歴（AccessLogs）。区分（入館/退館/エラー）・受付日時・
+                    端末情報・備考。代表者QRの1回の読取につきグループ内の
+                    来館者ごとに1件ずつ記録する。
+  MailHistory.cs    メール送信履歴（MailHistory）。メール種別・宛先区分・
+                    送信方式・結果・エラー内容。招待者宛と予約登録者宛は別レコード。
+  Company.cs        会社名マスタ（Companies）。来館予約入力の補助。
+  AuditLog.cs       操作監査ログ（AuditLog）。マスタ・運用設定の変更を記録。
+                    旧設計の SystemConfigHistory は廃止済み。
+
+  ■ Enums（区分・ステータス定義）
+  ----------------------------------------------------------------
+  VisitorStatus.cs      予約ステータス(未入館=0/入館中=1/退館済=2/キャンセル=9)。
+  RoleType.cs           権限ロール(管理者=1/受付=2/一般=3)。
+  ReservationType.cs    予約種別(事前予約=1/当日受付=2)。
+  AccessType.cs         入退館区分(入館=1/退館=2/エラー=9)。
+  MailType.cs           メール種別(来館案内=1/リマインド=2/キャンセル通知=3/再送信=4)。
+  MailRecipientType.cs  宛先区分(招待者[代表者のみ]=1/予約登録者=2)。
+  MailProviderType.cs   送信方式(SendGrid=1/SMTP=2)。
+  MailSendStatus.cs     送信結果(失敗=0/成功=1)。
+  ChangeType.cs         監査ログの変更区分(登録=1/更新=2/削除=3)。
+  LabelSizeType.cs      ラベルサイズのプリセット(1/2/3)。1のみ標準搭載。
+
+  ■ Dtos（画面・サービス間の受け渡し用データ）
+  ----------------------------------------------------------------
+  VisitorSearchCondition.cs      来館予約の検索条件。閲覧範囲の絞り込みも本条件で表現。
+  AccessLogSearchCondition.cs    入退館履歴の検索条件。
+  MailHistorySearchCondition.cs  メール送信履歴の検索条件。
+  ReservationGroup.cs            代表者＋同行者＋QRトークンをまとめたグループ表現。
+                                 AllMembers で代表者を先頭に全員を列挙する。
+  ReservationInput.cs            予約の登録・編集入力（＋ReservationMemberInput）。
+                                 事前予約と当日受付で同一のDTOを使う。
+  ScanResult.cs                  QR読取結果（＋ScanResultMember）。受付画面はグループ
+                                 全員分をまとめて表示する。
+  ManualCheckOutTarget.cs        手動退館処理の対象者（入館時刻付き）。
+  LabelPreset.cs                 ラベルプリセット寸法。IsDefined で未設定を判定。
+
+  ■ Abstractions（インターフェース＝他層との契約）
+  ----------------------------------------------------------------
+  IDbConnectionFactory.cs   DB接続ファクトリ。★DB方式ごとに実装を差し替える。
+  IDbRetryPolicy.cs         リトライ方針。Azure SQLの一時エラーに対応。
+  IDbSession.cs             複数テーブルを1トランザクションで扱うセッション
+                            （＋IDbSessionFactory）。
+  IBackupService.cs         バックアップ運用の抽象。
+  IArchiveStorage.cs        ログアーカイブCSVの保管先（ローカル/Azure Blob）。
+  IDatabaseInitializer.cs   スキーマ自動作成（デモ版の初回起動用）。
+  IVisitorRepository.cs     来館予約。★設計書4.3.1節の4メソッドはそのまま維持し、
+                            グループ操作用のメソッドを追加している。
+  IQrTokenRepository.cs     QRトークン（発行・検証・使用回数更新）。
+                            TryConsumeAsync＝同時読取に対する排他制御。
+  IAccessLogRepository.cs   入退館履歴（登録・照会・アーカイブ・削除）。
+  IMailHistoryRepository.cs メール送信履歴（同上）。
+  ISiteRepository.cs / IOperatorRepository.cs / ICompanyRepository.cs /
+  IAuditLogRepository.cs    各マスタ・監査ログ。
+  IMailSender.cs            メール送信の共通契約。
+  ILabelPrinter.cs          ラベル印刷の共通契約（＋ILabelPdfPreview＝デモ用）。
+                            引数は予約グループ単位。デモPDFがメール文面の描画に
+                            同行者・予約登録者を使用するため。
+  IMailBodyComposer.cs      メール定型文（件名・本文）の組み立て契約。
+                            ★Printing がメール送信基盤（MailKit/SendGrid）に依存せず
+                              送信と同一の文面をPDFへ描画できるよう Core 側に置く。
+  IQrCodeImageGenerator.cs  QRコード画像の生成。
+  ILabelPresetProvider.cs   ラベルプリセット寸法の提供。
+
+  ■ Settings（appsettings.json のバインド先・設計書 付録B）
+  ----------------------------------------------------------------
+  DatabaseSettings.cs    Database セクション（Provider・接続文字列・リトライ設定）。
+                         DatabaseProviderNames に "SqlExpress"/"AzureSql" の定数。
+  MailSettings.cs        Mail セクション（Provider・SendGrid・SMTP）。
+  PrintingSettings.cs    Printing セクション（Provider・プリンタ名・テンプレート・
+                         ★ラベルプリセット3種の寸法）。
+  DemoSettings.cs        Demo セクション（Enabled・接続文字列・シード・リセット許可）。
+  BackupSettings.cs      Backup セクション（実行時刻・保管期間・出力先／PITR設定）。
+  LogArchiveSettings.cs  LogArchive セクション（保持月数・実行営業日・保管先）。
+
+  ■ Security / 業務ルール
+  ----------------------------------------------------------------
+  Security/PasswordHasher.cs    パスワードのハッシュ化・検証
+                                (PBKDF2/HMAC-SHA256・反復21万・固定時間比較)。
+                                保存形式 "PBKDF2$反復$ソルト$ハッシュ"。
+  Security/OperatorContext.cs   ログイン中の操作ユーザー。認証後の認可判定に使う。
+  Security/PermissionPolicy.cs  ★RBAC権限マトリクス（設計書11.6節）を集約した判定。
+                                CanCreateReservation/CanEditReservation/
+                                CanDeleteReservation/CanOperateOnReservation/
+                                CanUseReception/CanManualCheckOut/
+                                CanResendMail/CanManageCompanies/CanManageSites/
+                                CanManageOperators/CanViewSystemSettings/CanResetDemoData。
+                                ★予約の登録・編集・キャンセルは一般ロールにも許可する。
+                                  対象は自分が登録した予約のみで、行単位の判定は
+                                  CanOperateOnReservation で行う。削除・メール再送信は
+                                  引き続き管理者・受付のみ。
+                                ResolveViewScope＝履歴・予約の閲覧範囲を決定
+                                （管理者=全拠点全件／受付=自拠点／一般=自分の登録分）。
+                                ApplyViewScope＝検索条件へ閲覧範囲を反映。
+  VisitRules.cs                 ★QR有効期限と状態遷移のルール。
+                                ・ValidFromOffset = -30分、ValidToOffset = +2時間
+                                ・CalculateExpiresAtUtc / CalculateValidFromUtc
+                                ・IsWithinReceptionWindow＝受付可能時間帯の判定
+                                ・CanCancel＝退館済からのキャンセルは不可
+                                ・CanResendMail＝事前予約かつ未入館/入館中のみ
+
+
+════════════════════════════════════════════════════════════════════
+  2. VisitorManagement.Application  ── アプリケーション層
+                                       業務ロジック・ユースケース
+════════════════════════════════════════════════════════════════════
+
+  ■ Exceptions
+  ----------------------------------------------------------------
+  BusinessRuleException.cs    業務ルール違反（入力不備・状態不整合）。
+                              メッセージはそのままユーザーへ提示できる。
+  PermissionDeniedException.cs 権限不足。ForOperation("操作名") で生成。
+
+  ■ Services（各業務サービス）
+  ----------------------------------------------------------------
+  AuthenticationService.cs  ログイン認証。ID不存在時もダミーハッシュを検証して
+                            応答時間をそろえ、アカウント列挙を防ぐ。失敗理由
+                            （ID誤り/PW誤り/無効化）は呼び出し側に区別させない。
+
+  ReservationService.cs     ★来館予約の中核（設計書 6.1/6.2/6.6/6.7節）。
+                            ・CreateAsync＝代表者＋同行者を1トランザクションで登録し、
+                              QRトークンを代表者行にのみ1件発行してメール送信。
+                              当日受付は予約登録者宛の控えを省略する。
+                              ★当日受付は「登録＝入館」として扱う（設計書からの変更）。
+                                発行時刻でグループ全員を「入館中」にし、全員分の入館履歴を
+                                同一トランザクションで記録する。QRトークンは UsedCount=1
+                                （読取済み）で発行するため、発行したQRの最初の読取が
+                                「2回目＝退館」として処理される。
+                            ・UpdateAsync＝同行者の増減にも対応。予約日時が変わると
+                              未使用トークンの有効期限を追随させる。
+                            ・CancelAsync＝グループ全員をキャンセルしトークンを無効化、
+                              招待者へキャンセル通知。
+                            ・DeleteAsync＝入退館記録がある予約は削除不可（キャンセルを使う）。
+                            ・ResendMailAsync＝有効期限内かつ未使用なら既存トークンを再送、
+                              期限切れなら期限を再計算して延長（いずれも再発行回数を加算）。
+                            ・SearchAsync＝ロールに応じた閲覧範囲を自動適用。
+
+  AccessService.cs          ★入退館受付の中核（設計書 6.4/6.4.1/6.5節）。
+                            ・ScanAsync＝QR読取。トークン検証（無効/キャンセル/
+                              読取済/期限切れ/受付時間前）→ TryConsumeAsync で排他的に
+                              読取回数を加算 → グループ全員のステータス一括更新 →
+                              全員分の AccessLogs を記録、を1トランザクションで実行。
+                                1回目=入館 / 2回目=退館 / 3回目以降=エラー
+                              エラー時は代表者行に1件だけエラーログを記録する。
+                            ・ManualCheckOutAsync＝手動退館処理。★選択した個人のみを
+                              退館済にする（グループ全員は更新しない）。TokenIdは
+                              代表者の共通トークンを参照。受付・管理者ロールのみ。
+                            ・SearchManualCheckOutTargetsAsync＝氏名・来館日で対象者検索。
+                            ★読取結果メッセージは本ファイル冒頭の定数（日本語のみ）。
+
+  MailDeliveryService.cs    メール送信と履歴記録の統括（設計書 5.2節）。
+                            招待者（代表者）と予約登録者の2者のみへ送信し、
+                            結果をそれぞれ独立したレコードとして MailHistory へ記録。
+                            ★送信失敗は予約登録を失敗させない（履歴に失敗として残す）。
+
+  HistoryService.cs         履歴照会（設計書 6.8節）。入退館履歴・メール送信履歴の検索、
+                            CSV文字列生成、アーカイブ案内メッセージの組み立て。
+                            ToText(...)＝ステータス・区分・ロールの日本語表示名を集約。
+                            ToLocalText(...)＝UTC保存の日時をローカル時刻表示へ変換。
+
+  MasterDataService.cs      会社名マスタ・拠点マスタの登録/編集/削除（管理者専用）。
+                            変更内容は AuditLog へ記録（ロゴ画像はバイト数のみ記録）。
+                            IsSingleSiteAsync＝Entryプランの拠点選択UI非表示判定。
+
+  OperatorService.cs        操作ユーザー管理（管理者専用）。ロール・所属拠点・メールを
+                            必須検証。★最後の有効な管理者を無効化・降格できないよう保護。
+                            パスワードは監査ログに残さず「変更した事実」のみ記録。
+
+  SystemSettingsService.cs  システム設定確認（管理者専用・読取専用）。DB方式・リトライ・
+                            バックアップ運用・メール方式・印刷方式・ラベルプリセット・
+                            ログアーカイブ・デモ有無の現在値を組み立てて返す。
+
+  LogArchiveService.cs      ログ保持・アーカイブ（設計書 10.4節）。
+                            RunAsync＝対象月（既定は前月）の履歴をCSV出力し、
+                            保持期間を超えたデータをDBから削除。
+                            CalculateDeleteThresholdUtc＝当月を含め保持月数分を残す。
+                            IsNthBusinessDayOfMonth＝第N営業日の判定（土日を除外）。
+
+  AuditService.cs           操作監査ログの記録。RecordInsert/Update/DeleteAsync で
+                            変更前後の値をJSONとして保存。
+                            AuditTargets に対象エンティティ名の定数。
+
+  DemoDataSeeder.cs         デモ用サンプルデータ（設計書 19.3節）。
+                            SeedIfEmptyAsync＝初回起動時のみ投入（冪等）。
+                            ResetAsync＝全削除して再投入（管理者ロール専用）。
+                            ★デモ用ログインの初期パスワードは DemoPassword 定数。
+
+
+════════════════════════════════════════════════════════════════════
+  3. VisitorManagement.Infrastructure.Data ── インフラ層
+                                              Dapper による DBアクセス（共通）
+════════════════════════════════════════════════════════════════════
+  ★本プロジェクトのSQL文はDB方式に依らず完全共通。
+    SQL Server Agent・クロスDBクエリ・CLR統合・USE文といった
+    非互換機能は使用しない（設計書 4.5節）。
+
+  DbSession.cs              IDbSession の実装。接続は必ず IDbConnectionFactory 経由。
+                            Commit されずに破棄された場合はロールバックする。
+  DapperConfiguration.cs    Dapper の型マッピング登録（冪等）。
+                            ・DateOnlyTypeHandler   date 列 ↔ DateOnly
+                            ・TimeOnlyTypeHandler   time 列 ↔ TimeOnly
+                            ・UtcDateTimeTypeHandler datetime2 の UTC 往復を保証
+                              （SQL Server は Kind を保持しないため読取時に UTC を明示）
+  RepositoryBase.cs         セッション解決とリトライ適用を集約。
+                            ★呼び出し側からトランザクションが渡された場合は
+                              リトライを適用しない（整合性を損なうため）。
+  DatabaseInitializer.cs    スキーマ作成スクリプトの実行。db\01_CreateSchema.sql を
+                            埋め込みリソースとして同梱し、GO行で分割して実行する。
+
+  ■ Repositories
+  ----------------------------------------------------------------
+  VisitorRepository.cs      来館予約。グループ取得・グループ単位のステータス一括更新
+                            （★キャンセル済みは対象外）・手動退館対象の検索。
+                            EscapeLike＝LIKE検索のワイルドカードをエスケープ。
+  QrTokenRepository.cs      QRトークン。TryConsumeAsync は WHERE句に現在値を含めて
+                            同時読取時に後発の更新を失敗させる。
+  AccessLogRepository.cs    入退館履歴。CreateManyAsync でグループ全員分を一括登録。
+                            ToUtcRangeStart/EndExclusive＝画面のローカル日付をUTC範囲へ変換。
+  MailHistoryRepository.cs  メール送信履歴。エラー内容は nvarchar(500) に収まるよう切詰め。
+  SiteRepository.cs / OperatorRepository.cs / CompanyRepository.cs /
+  AuditLogRepository.cs     各マスタ・監査ログ。
+
+
+════════════════════════════════════════════════════════════════════
+  4. Infrastructure.Data.SqlExpress / .AzureSql ── DB方式ごとの差分
+════════════════════════════════════════════════════════════════════
+
+  ■ SqlExpress（オンプレ版・デモ版）
+  ----------------------------------------------------------------
+  SqlExpressConnectionFactory.cs  接続ファクトリ。★デモ版（Demo:Enabled=true）は
+                                  本クラスをそのまま使い、接続先のみ
+                                  Demo:ConnectionString に切り替える。
+  NoRetryPolicy.cs                リトライなし（社内LAN想定・即時に例外送出）。
+  SqlExpressBackupService.cs      BACKUP DATABASE の実行。
+                                  ★バックアップ圧縮(COMPRESSION)は Express Edition では
+                                    未サポート（エラー1844）のため、エディションを判定して
+                                    INIT, CHECKSUM に落とす。
+                                  ★svc_visitor は最小権限のため通常運用では権限エラーになる。
+                                    定時バックアップは scripts\Backup-VisitorMgmt.ps1 を
+                                    特権アカウントで実行する（設計書 10.1節）。
+  LocalArchiveStorage.cs          ログアーカイブCSVをローカルディスクへ保存（BOM付きUTF-8）。
+
+  ■ AzureSql（クラウド版）
+  ----------------------------------------------------------------
+  AzureSqlConnectionFactory.cs    接続ファクトリ。★Encrypt=True /
+                                  TrustServerCertificate=False を強制する（設計書11.2節）。
+                                  認証はSQL認証に統一（Entra IDは将来拡張・実装しない）。
+  AzureSqlRetryPolicy.cs          Polly による指数バックオフ（既定5回・最大10秒）。
+                                  ★一時エラーのエラー番号は TransientErrorNumbers に定義
+                                    （40501=スロットリング、40613=DB利用不可 等）。
+  AzureSqlBackupService.cs        自動バックアップに委譲（独自実装は持たない）。
+  AzureBlobArchiveStorage.cs      ログアーカイブCSVを Azure Blob Storage へ保存。
+
+
+════════════════════════════════════════════════════════════════════
+  5. VisitorManagement.Infrastructure.Mail ── メール送信
+════════════════════════════════════════════════════════════════════
+  MailSenderBase.cs       宛先解決と本文組み立ての共通処理。派生クラスは
+                          SendCoreAsync（実送信）のみを実装する。
+  SendGridMailSender.cs   SendGrid による送信（クラウド版の既定）。
+  SmtpMailSender.cs       SMTP による送信（オンプレ版の既定・MailKit）。
+                          587=STARTTLS / 465=暗黙的SSL を自動選択。
+  DemoMailSender.cs       デモ版のモック。実送信せずメモリ上に保持する。
+                          MailHistory.Provider には設定上の方式を記録する。
+                          ★IsTestMode=true。本番以外（Demo:Enabled=true または
+                            Debugビルド）では本実装が使われ、外部送信は行われない。
+                            画面の送信結果は「テスト（実際には送信していません）」
+                            と表示されるが、送信履歴は本番と同じく記録する。
+  MailBodyComposer.cs     MailTemplates を IMailBodyComposer として公開するアダプタ。
+                          デモPDFのメール文面描画から同じ定型文を参照するために使う。
+  MailTemplates.cs        ★来館案内メールの定型文（設計書 6.3節・6.12節）。
+                          日本語と英語を同一文面内に併記する。
+                          ・BuildSubject       件名（予約登録者宛は「【控え】」を付加）
+                          ・BuildInvitationBody 本文（★同行者の氏名・会社名を一覧記載）
+                          ・BuildReminderBody / BuildCancellationBody
+                          ・ToHtmlBody         HTMLメール用に変換（エスケープ込み）
+                          ★顧客ごとの文言調整箇所には行頭に「// ★レイアウト調整」を付与。
+
+
+════════════════════════════════════════════════════════════════════
+  6. VisitorManagement.Infrastructure.Printing ── QR生成・ラベル印刷
+════════════════════════════════════════════════════════════════════
+  QrCodeImageGenerator.cs  QRCoder による QRコード画像生成。誤り訂正レベルQ。
+                           ★色を明示して24bitトゥルーカラーPNGを出力する。
+                             既定の1bitグレースケールPNGは PDFsharp が読めないため。
+  LabelPresetProvider.cs   ラベルプリセット寸法の提供。プリセット1のみ標準搭載
+                           （幅60mm×高さ110mm）。2・3は導入時ヒアリングで個別設定。
+  Ql800LabelPrinter.cs     本番用。b-PAC SDK（ブラザー工業提供）による実機印刷。
+                           ★COM参照を直接持たず ProgID による遅延バインディングで
+                             呼び出すため、SDK未インストール環境でもビルド・実行できる。
+                           テンプレート(.lbx)内のオブジェクト名は本ファイル先頭の定数
+                           （qrImage / companyName / visitorName / visitDate / logoImage）。
+  DemoPdfLabelPrinter.cs   デモ用。A4 1枚の上半分にラベル実寸を点線枠で描画し（複数
+                           プリセットを横に並べる）、下半分に送信メール2通の文面を
+                           左＝予約登録者（控え）宛／右＝来訪者代表（招待者）宛で
+                           並べて表示する（設計書 19.4節）。
+                           ★本文は下半分に収まるようフォントを 6.5→5.0pt の範囲で
+                             自動縮小し、それでも溢れる場合のみ末尾を省略する。
+  JapaneseFontResolver.cs  PDFsharp 用の日本語フォント解決。
+                           ★PDFsharp のコアパッケージはシステムフォントを自動解決しない
+                             ため、Windows標準の日本語フォントを探索して読み込む。
+
+
+════════════════════════════════════════════════════════════════════
+  7. VisitorManagement.Composition  ── DI合成（Provider切替）
+════════════════════════════════════════════════════════════════════
+  ServiceCollectionExtensions.cs ★全サービスのDI登録（設計書 4.4節）。
+                                 WinForms・受付Web・バッチの3ホストが同一の
+                                 AddVisitorManagement(configuration) を呼び出す。
+                                   AddVisitorManagementSettings  各セクションのOptionsバインド
+                                   AddDatabaseProvider           ★DB方式の切替
+                                   AddRepositories               Repository実装
+                                   AddMailProvider               ★メール方式の切替（デモ優先）
+                                   AddPrintingProvider           ★印刷方式の切替
+                                   AddArchiveStorage             ★アーカイブ保管先の切替
+                                   AddApplicationServices        業務サービス
+  DpapiSecretProtector.cs        設定ファイル中の機微情報を Windows DPAPI で保護
+                                 （設計書 11.3節）。"ENC:<base64>" 形式の値を起動時に復号。
+                                 対象キーは ProtectedKeys 配列。
+                                 暗号化は scripts\Protect-Secret.ps1 で行う。
+  DemoStartup.cs                 デモ版の起動時初期化（スキーマ自動作成＋シード投入）。
+                                 Demo:Enabled=false のときは即座に戻る。
+
+
+════════════════════════════════════════════════════════════════════
+  8. VisitorManagement.WinFormsApp  ── 管理アプリ（画面1〜7）
+════════════════════════════════════════════════════════════════════
+  ※画面はすべてコードでUIを組んでいる（BuildLayout メソッド内）。
+    デザイナー(.Designer.cs)は使用しないので注意。
+
+  Program.cs              エントリポイント。設定読込（appsettings.json →
+                          appsettings.Local.json → 環境変数 VISITORMGMT_）→
+                          DPAPI復号 → DI構築 → デモ初期化 →
+                          初期セットアップ判定 → ログイン → メイン画面。
+  appsettings.json        接続文字列・メール・印刷・バックアップ・アーカイブの設定。
+  appsettings.Local.json  ★導入先ごとの上書き設定。リポジトリには含めない
+                          （.gitignore 対象）。存在する場合のみ出力へコピーされる。
+  AppSession.cs           ログイン中の操作ユーザーを保持するセッション。
+  UiTheme.cs              ★共通の外観設定と画面構築ヘルパー。
+                          フォント・グリッド生成・ラベル/ボタン生成・
+                          メッセージ表示・ShowError（例外種別に応じた文言変換）・
+                          RunWithWaitCursorAsync（処理中カーソル）。
+  Logging/FileLoggerProvider.cs 簡易ファイルロガー。logs\app-YYYYMMDD.log に出力。
+
+  ■ Forms
+  ----------------------------------------------------------------
+  InitialAdminSetupForm.cs 初期セットアップ。★操作ユーザーが1件も無い初回起動時のみ
+                           表示し、最初の拠点と管理者アカウントを登録する（設計書13.1節⑤⑥）。
+  LoginForm.cs             画面1: ログイン。認証失敗の理由は区別して提示しない。
+  MainForm.cs              メイン画面。メニュー＋ショートカットボタン＋ステータスバー。
+                           ★ApplyPermissions でロール別に項目の活性・表示を制御し、
+                             ボタンはメニュー項目の Enabled に連動させて権限制御を1か所に集約。
+                           デモ版かつ管理者のときのみ「サンプルデータ初期化」を表示。
+  ReservationListForm.cs   画面2: 来館予約管理。予約グループ単位（代表者1行）で一覧表示し、
+                           同行者人数を「+N名」で表示。新規/編集/QR表示/PDFレイアウト確認/
+                           メール再送信/キャンセル/削除。
+                           ★一般ロールは削除・メール再送信ボタンを非表示（登録・編集・
+                             キャンセルは自分が登録した予約に対してのみ可能）。
+                           ★「PDFレイアウト確認」は ILabelPdfPreview が解決できるとき
+                             （デモ版構成または Debugビルド）のみ表示する確認用の導線。
+  ReservationEditForm.cs   画面2: 予約の登録・編集。代表者＋同行者グリッド。
+                           会社名は会社名マスタから入力補助。
+                           ★一般ロールの新規登録時は訪問先担当者へ自身の表示名を
+                             自動入力する（変更可）。
+  QrCodePreviewForm.cs     QRコード表示。画像保存・有効期限・読取回数の確認。
+                           ★ILabelPdfPreview が解決できるとき（デモ版構成または
+                             Debugビルド）のみ「レイアウトをPDFで確認」ボタンを表示し、
+                             ラベル＋メール文面のA4 PDFを出力して既定のビューアで開く。
+  ManualCheckOutForm.cs    手動退館処理（設計書 6.4.1節）。入館中の来館者を氏名・来館日で
+                           検索し、個人単位で退館処理する。受付・管理者ロールのみ。
+  HistoryForm.cs           画面3: 履歴照会。入退館履歴／メール送信履歴をタブ切替。
+                           CSV出力（BOM付きUTF-8）。保持期間より前を指定すると
+                           アーカイブCSVの保管場所を案内する。
+  CompanyMasterForm.cs     画面4: 会社名マスタ管理（管理者専用）。
+  SiteMasterForm.cs        画面5: 拠点マスタ管理（管理者専用）。ラベル表示社名・
+                           ロゴ画像・ラベルサイズプリセットを設定。
+  OperatorMasterForm.cs    画面6: 操作ユーザー管理（管理者専用）。
+                           ＋PasswordInputForm（パスワード変更ダイアログ）。
+  SystemSettingsForm.cs    画面7: システム設定確認（管理者専用・読取専用）。
+
+  Properties/PublishProfiles/SelfContained.pubxml
+                           ★自己完結型発行の設定（設計書13.1節）。管理PCへの
+                             .NET 10 Desktop ランタイム事前インストールを不要にする。
+
+
+════════════════════════════════════════════════════════════════════
+  9. VisitorManagement.WebReception ── 受付Web/API（画面8〜9）
+════════════════════════════════════════════════════════════════════
+  Program.cs                  DI構築・DPAPI復号・デモ初期化・Cookie認証・
+                              Razor Pages・/api/access/scan の登録。
+                              ★Cookie は SameSite=Strict（CSRF対策）。
+  Security/OperatorPrincipal.cs 認証Cookie（Claims）と OperatorContext の相互変換。
+                              認証は管理アプリと同一の Operators テーブル。
+  Endpoints/AccessApi.cs      ★POST /api/access/scan（設計書 8.3節）。
+                              CSRFトークン検証 → 権限チェック（管理者・受付のみ）→
+                              AccessService.ScanAsync → 結果をJSONで返す。
+                              ScanRequest / ScanResponse / ScanResponseMember。
+  Resources/ReceptionTexts.cs ★受付Webの表示文言（設計書 6.12節）。
+                              ・ReceptionTexts        日英併記（当日受付登録画面）
+                              ・ReceptionResultTexts  日本語のみ（QR読取結果画面）
+                              ★顧客ごとの文言調整箇所には行頭に「// ★レイアウト調整」を付与。
+
+  ■ Pages
+  ----------------------------------------------------------------
+  Shared/_Layout.cshtml   共通レイアウト（ヘッダー・ログアウト・フッター）。
+  Login.cshtml(.cs)       受付端末のログイン（＋LogoutModel）。
+  Index.cshtml(.cs)       ルートを受付画面へリダイレクト。
+  Reception.cshtml(.cs)   画面8: 受付画面。★QRリーダーはキーボードエミュレーション方式を
+                          前提とし、入力末尾の Enter をトリガーに /api/access/scan へ送信する。
+                          結果は大きな文字でグループ全員分を表示し、一定時間で自動的に消える。
+                          常に入力欄へフォーカスを戻す。日本語のみ。
+                          ★端末カメラでの読取をUSB QRリーダーと併用できる。
+                            復号した文字列を同じ submitScan() に渡すため、サーバー側
+                            （AccessApi／AccessService）の処理は完全に共通である。
+                            ・BarcodeDetector があれば使用し、無ければ同梱 jsQR で復号
+                            ・カメラAPIはHTTPSまたはlocalhostでのみ動作するため、
+                              セキュアコンテキストでない場合はボタンを出さず理由を表示する
+                            ・同じQRをかざし続けている間は再送信しない（連続未検出が
+                              REARM_MISS_FRAMES 続いた場合のみ再受付）。かざしっぱなしで
+                              「退館済みです」等のエラー履歴が量産されるのを防ぐ
+                            ・端末情報に「／カメラ」「／スキャナー」を付けて送信し、
+                              AccessLogs.DeviceInfo から読取経路を判別できるようにする
+  WalkIn.cshtml(.cs)      画面9: 当日受付登録。★日英併記。代表者＋同行者のグループ登録、
+                          メールアドレスは任意。登録と同時にQR発行＋ラベル印刷。
+                          OnGetLabelPdfAsync＝デモ版のA4 PDFプレビュー。
+  Error.cshtml(.cs)       未処理例外の表示（技術的詳細は出さず参照IDのみ）。
+
+  wwwroot/css/site.css    受付端末向けスタイル。タッチ操作と遠目での視認性を優先。
+  wwwroot/js/jsQR.js      QRコード復号ライブラリ（Apache-2.0・無改変で同梱）。
+                          BarcodeDetector 非対応環境（iOS Safari 等）でのフォールバック。
+                          ★CDNは参照しない（自己完結型発行・LAN内オフライン運用のため）。
+                            入手元・バージョン・SHA-256 は wwwroot/js/README.txt を参照。
+
+
+════════════════════════════════════════════════════════════════════
+ 10. VisitorManagement.BatchRunner ── 定時バッチ
+════════════════════════════════════════════════════════════════════
+  Program.cs   Windows タスクスケジューラ／Azure Functions から呼び出すコンソール。
+               ・backup       バックアップ実行＋保管期間超過ファイルの削除
+               ・log-archive  月次CSVアーカイブ＋保持期間超過データの削除
+                   --month yyyy-MM          対象月（既定は前月）
+                   --no-delete              DBからの削除を行わない
+                   --only-on-scheduled-day  当日が実行営業日でなければ何もしない
+               終了コード: 0=正常 / 1=引数エラー / 2=実行時エラー
+               ★設定ファイルは管理アプリの appsettings.json をリンク参照して共有する。
+
+
+════════════════════════════════════════════════════════════════════
+ 11. VisitorManagement.Tests      ── テスト（xUnit・112件）
+════════════════════════════════════════════════════════════════════
+  VisitRulesTests.cs          受付時間帯の境界値（-30分/-31分/+120分/+121分）・
+                              キャンセル可否・再送信可否。
+  PasswordHasherTests.cs      ハッシュ/検証・平文非含有・ソルト・列長。
+  PermissionPolicyTests.cs    RBAC権限マトリクス全項目＋閲覧範囲。
+  AccessServiceTests.cs       ★QR受付シナリオ（設計書12.3節）。1回目/2回目/3回目・
+                              期限切れ・受付時間前・無効化・キャンセル・未登録・
+                              同時読取・キャンセル済み同行者の除外・手動退館処理。
+  LogArchiveServiceTests.cs   削除しきい値の算出・第N営業日の判定。
+  HistoryServiceTests.cs      CSVエスケープ・CSV出力・表示名変換。
+  MailTemplatesTests.cs       同行者一覧の記載・控え表記・日英併記・HTMLエスケープ。
+  PrintingTests.cs            QRコード生成・ラベルプリセット。
+  DatabaseInitializerTests.cs SQLスクリプトのGO行分割。
+  Fakes/InMemoryRepositories.cs テスト用のインメモリ Repository 一式。
+
+
+════════════════════════════════════════════════════════════════════
+ 12. db / scripts / docs
+════════════════════════════════════════════════════════════════════
+  ■ db（DBスキーマ）
+  ----------------------------------------------------------------
+  00_CreateDatabase_SqlExpress.sql  VisitorMgmt / VisitorMgmtDemo を作成。
+  01_CreateSchema.sql               ★初期スキーマ（8テーブル・25インデックス）。
+                                    冪等。Infrastructure.Data に埋め込みリソースとして
+                                    リンク同梱されるため、二重管理にならない。
+  02_CreateLogin_SqlExpress.sql     svc_visitor（最小権限）の作成。
+                                    デモ用DBにのみDDL権限を付与する。
+  02_CreateUser_AzureSql.sql        Azure SQL 用（master と対象DBの2段階実行）。
+
+  ■ scripts（運用スクリプト）
+  ----------------------------------------------------------------
+  Backup-VisitorMgmt.ps1      バックアップ（設計書 10.1節）。世代管理込み。
+  Register-ScheduledTasks.ps1 タスクスケジューラへの登録（バックアップ＋アーカイブ）。
+  Protect-Secret.ps1          設定値のDPAPI暗号化／復号（設計書 11.3節）。
+
+  ■ docs（文書）
+  ----------------------------------------------------------------
+  導入手順書.md / デモ操作手順書.md / 運用マニュアル.md
+  プログラム構成と役割.txt（本書）/ 簡易マニュアル.txt /
+  動作検証確認項目.txt / 編集マニュアル.txt
+
+
+════════════════════════════════════════════════════════════════════
+ 13. 編集ガイド（◯◯を変えたい時はどこを触るか）
+════════════════════════════════════════════════════════════════════
+
+【DBをSQL Server ExpressからAzure SQL Databaseに変えたい】★本システムの中核
+  → appsettings.json の Database:Provider を "AzureSql" に変更して再起動するだけ。
+    接続文字列 Database:ConnectionStrings:AzureSql も設定する。
+  ※コードの変更は一切不要。切替の登録は
+    VisitorManagement.Composition\ServiceCollectionExtensions.cs の AddDatabaseProvider。
+  ※運用途中の切替は非稼働日にバッチで実施（設計書13.3節・稼働中の無停止移行は非対応）。
+
+【QRコードの有効時間（30分前〜2時間後）を変えたい】
+  → VisitorManagement.Core\VisitRules.cs の ValidFromOffset / ValidToOffset
+  ※発行・読取・再送信のすべてが同メソッドを呼ぶため、ここ1か所で全体に反映される。
+
+【1回目=入館/2回目=退館 の読取ロジックを変えたい】
+  → VisitorManagement.Application\Services\AccessService.cs の ScanAsync
+  ※読取回数は QRTokens.UsedCount で管理（0→1→2）。
+  ※3回目以降は AccessLogs にエラーを記録するだけでステータスは変えない。
+
+【当日受付の「登録＝入館」の扱いを変えたい】★設計書からの変更仕様
+  → VisitorManagement.Application\Services\ReservationService.cs の CreateAsync
+    （isWalkIn の分岐。初期ステータス・UsedCount の初期値・入館履歴の作成）
+  ※発行時刻を入館時刻として AccessLogs に記録する。
+  ※QRトークンを UsedCount=1 で発行することで、AccessService 側は改修せずに
+    「発行したQRの最初の読取＝退館」を実現している。
+  ※画面の案内文は WebReception\Resources\ReceptionTexts.cs
+    （CompletedTitle / CompletedDescription / CheckedInAtFormat / ScanHint）。
+
+【受付画面に表示するメッセージを変えたい】
+  → 読取結果のメッセージ = AccessService.cs 冒頭の定数
+    （MessageCheckedIn / MessageCheckedOut / MessageAlreadyCheckedOut 等）
+  → 画面の見出し・案内文 = WebReception\Resources\ReceptionTexts.cs の
+    ReceptionResultTexts
+  ※読取結果表示画面は多言語対応の対象外（日本語のみ・設計書8.3節）。
+
+【当日受付画面の日英併記の文言を変えたい】★顧客ごとの調整
+  → VisitorManagement.WebReception\Resources\ReceptionTexts.cs
+  → メール文面 = VisitorManagement.Infrastructure.Mail\MailTemplates.cs
+  ※調整対象の行には行頭に「// ★レイアウト調整」が付いている。
+    このキーワードでソース全文検索すると調整箇所が一覧できる（設計書18章 確認事項No.3）。
+  ※管理画面（WinForms）は日本語のみ。多言語化の対象外。
+
+【権限（ロール）ごとにできることを変えたい】
+  → 判定ロジック = VisitorManagement.Core\Security\PermissionPolicy.cs（ここ1か所）
+  → 画面のメニュー表示 = WinFormsApp\Forms\MainForm.cs の ApplyPermissions
+  → 各画面のボタン活性 = 各 Form.cs の ApplyPermissions
+  → 受付Webの制御 = Reception.cshtml.cs / WalkIn.cshtml.cs / Endpoints\AccessApi.cs
+  ※UI側で隠すだけでなく、サービス層とAPIでも必ず判定する（多層防御）。
+
+【履歴の閲覧範囲（一般=自分の登録分 等）を変えたい】
+  → PermissionPolicy.ResolveViewScope（ここ1か所）
+  ※各サービスの検索メソッドが ApplyViewScope を呼んで検索条件へ反映する。
+
+【ラベルのサイズ（プリセット2・3）を設定したい】★導入時によく使う
+  → appsettings.json の Printing:LabelPresets:Preset2 / Preset3 に
+    WidthMm / HeightMm / LabelPartNumber を設定する。
+  → 拠点ごとの使用プリセットは「拠点マスタ管理」画面で選択（Sites.LabelSizeType）。
+  ※既定ではプリセット1（幅60mm×高さ110mm）のみ設定済み。
+
+【ラベルの印刷レイアウトを変えたい】
+  → 本番（実機印刷）= P-touch Editor でテンプレート(.lbx)を編集し、
+    appsettings.json の Printing:LbxTemplatePath を指定。
+    オブジェクト名は Ql800LabelPrinter.cs 冒頭の定数と一致させる。
+  → デモ（PDFプレビュー）= Infrastructure.Printing\DemoPdfLabelPrinter.cs の
+    DrawLabelPreview（配置）/ DrawHeader / DrawFooter。
+
+【メール送信方式（SendGrid/SMTP）を変えたい】
+  → appsettings.json の Mail:Provider を "SendGrid" / "Smtp" に変更して再起動。
+  ※切替の登録は Composition\ServiceCollectionExtensions.cs の AddMailProvider。
+
+【メールの宛先ルールを変えたい】
+  → VisitorManagement.Application\Services\MailDeliveryService.cs の SendInvitationAsync
+  ※現仕様は「招待者（代表者）と予約登録者の2者のみ」。同行者個人へは送信しない
+    （設計書 5.2節・16章 確認事項No.1）。
+
+【ログの保持期間（3か月）やアーカイブ先を変えたい】
+  → appsettings.json の LogArchive セクション
+    ・DbRetentionMonths            DB上の保持月数
+    ・ExportOnBusinessDayOfMonth   CSV出力を行う第N営業日
+    ・StorageMode                  "Local"（オンプレ）/ "AzureBlob"（クラウド）
+  → 算出ロジック = Application\Services\LogArchiveService.cs
+
+【DBの項目（テーブルの列）を追加・変更したい】
+  ① db\01_CreateSchema.sql に列を追加（既存DBにはALTER文を別途用意）
+  ② VisitorManagement.Core\Entities\ の該当エンティティにプロパティを追加
+  ③ Infrastructure.Data\Repositories\ の該当Repositoryで
+     SELECT句・INSERT/UPDATE文・パラメータを追加
+     ★パラメータの追加漏れは実行時に「スカラー変数を宣言してください」エラーになる
+  ④ 必要ならDTO・画面・CSV出力を更新
+  ※本システムは Dapper（手書きSQL）であり、EF Core のマイグレーションは無い。
+
+【接続先データベースを変えたい】
+  → 各アプリの appsettings.Local.json（無ければ appsettings.json）の
+    Database:ConnectionStrings:SqlExpress / AzureSql
+  ※対象は WinFormsApp / WebReception / BatchRunner の3か所。
+  ※パスワードは scripts\Protect-Secret.ps1 で暗号化した "ENC:..." を推奨。
+
+【新しい画面（WinForms）を追加したい】
+  ① WinFormsApp\Forms\ に Form 継承のクラスを追加
+     （コンストラクタは IServiceProvider を受け取る形にそろえる）
+  ② UiTheme.Apply(this) を呼び、BuildLayout メソッドでUIを組む
+  ③ MainForm.cs のメニュー項目・ショートカットボタン・ApplyPermissions に追加
+  ④ 新しい業務ロジックが要るなら下記「サービス追加」も実施
+
+【新しい画面（受付Web）を追加したい】
+  ① WebReception\Pages\ に .cshtml と .cshtml.cs を追加
+  ② PageModel に [Authorize] を付け、OperatorPrincipal.ToOperatorContext(User) で
+     権限判定する
+  ③ 日英併記が必要なら Resources\ReceptionTexts.cs に文言を追加
+     （行頭に「// ★レイアウト調整」を付ける）
+
+【新しいサービス（業務ロジック）を追加したい】
+  ① 必要なら Core\Abstractions\ にインターフェースを追加
+  ② Application\Services\ に実装を追加
+  ③ Composition\ServiceCollectionExtensions.cs の AddApplicationServices に1行追加
+     services.AddSingleton<XxxService>();
+  ※権限判定は必ず PermissionPolicy を使う（個別に条件を書かない）。
+
+【テストを追加・変更したい】
+  → tests\VisitorManagement.Tests\
+  ※DBを使わない単体テストは Fakes\InMemoryRepositories.cs のフェイクを使う。
+  ※internal メソッドを検証したい場合、対象プロジェクトの .csproj に
+    <InternalsVisibleTo Include="VisitorManagement.Tests" /> を追加する。
+
+【デモ用のサンプルデータを変えたい】
+  → Application\Services\DemoDataSeeder.cs の SeedAsync
+  ※「操作ユーザーが0件のときだけ」投入される。作り直すには管理アプリの
+    「サンプルデータ初期化」を実行する（管理者ロール・デモ版のみ）。
+
+
+════════════════════════════════════════════════════════════════════
+ 14. ログ管理（どのフォルダに何のログが出るか）
+════════════════════════════════════════════════════════════════════
+  ログは「①アプリ動作ログ（ファイル）」と「②操作監査ログ（DB）」の2種類がある。
+
+  ── ① アプリ動作ログ ────────────────────────────────────
+  ◇管理アプリ（WinForms）
+     出力先：実行ファイルと同じフォルダの logs\app-YYYYMMDD.log
+     実装  ：WinFormsApp\Logging\FileLoggerProvider.cs（日付ごとに分割）
+     形式  ：日時 [レベル] カテゴリ - メッセージ
+             例) 2026-08-25 15:40:32.323 [WRN] AuthenticationService -
+                 ログインに失敗しました（パスワード不一致）。LoginId: admin
+  ◇受付Web（ASP.NET Core）
+     標準のログ設定（appsettings.json の Logging セクション）に従う。
+     コンソール出力。IIS配下やサービス化した場合は各基盤のログへ。
+  ◇バッチ（BatchRunner）
+     コンソール出力。タスクスケジューラから実行する場合は
+     リダイレクト（> ログファイル）で保存する。
+  ◇記録される内容
+     ・ログイン失敗、予約登録、入退館受付、メール送信結果、
+       バックアップ・アーカイブの実行結果、各種エラー
+  ◇用途：不具合調査・動作確認（主に技術者向け）。
+
+  ── ② 操作監査ログ（データベース） ───────────────────────────
+  ◇保存先：DBテーブル AuditLog（誰が・いつ・何を変更したか）
+  ◇記録元：Application\Services\AuditService.cs
+           （拠点マスタ・会社名マスタ・操作ユーザー・運用設定の登録/更新/削除）
+  ◇内容  ：TargetEntity（対象）・TargetId・ChangeType（登録/更新/削除）・
+           OldValue / NewValue（JSON）・ChangedAt・ChangedByOperatorId
+  ◇注意  ：パスワードは記録しない（「変更した事実」のみ）。
+           ロゴ画像はバイト数のみ記録する（可読性のため）。
+  ◇DB方式の切替自体の監査テーブルは設けない（非稼働日バッチ運用のため・設計書11.5節）。
+
+  ── ③ 入退館履歴・メール送信履歴（業務ログ） ─────────────────────
+  ◇AccessLogs / MailHistory テーブル。管理アプリの「履歴照会」画面で照会・CSV出力。
+  ◇DB上の保持期間は直近3か月。それ以前は月次バッチでCSVへアーカイブ後に削除する
+    （設計書 10.4節）。
+
+
+════════════════════════════════════════════════════════════════════
+ 15. 補足
+════════════════════════════════════════════════════════════════════
+  ・依存方向：WinFormsApp / WebReception / BatchRunner → Composition →
+              Application・Infrastructure → Core
+              （Core はどこにも依存しない。Infrastructure が Core の
+                インターフェースを実装＝依存性逆転）
+
+  ・ビルド/実行:
+      dotnet build
+      dotnet test
+      dotnet run --project src\VisitorManagement.WebReception
+  ・発行（自己完結型）:
+      dotnet publish src\VisitorManagement.WinFormsApp -p:PublishProfile=SelfContained -c Release
+      dotnet publish src\VisitorManagement.WebReception -p:PublishProfile=SelfContained -c Release
+  ・ソリューションは .slnx 形式（.NET 10 SDK 既定）。
+    「VisitorManagement.sln」は存在しないので dotnet build に渡さないこと。
+
+  ・★sqlcmd 実行時は必ず -I を付ける
+      dbo.Visitors にフィルター選択インデックス UQ_Visitors_GroupRepresentative
+      （1予約グループに代表者1名を保証）があるため、QUOTED_IDENTIFIER が OFF だと
+      同テーブルへの DDL/DML がエラー1934で失敗する。
+      アプリ（Microsoft.Data.SqlClient）は既定ONのため対応不要。
+
+  ・スコープ外（設計書14章 将来拡張）：
+      Entra ID認証対応 ／ Teams通知連携 ／ 社員証（ICカード）連携
+ ・デバッグ用テストアカウント：
+　　　admin	　　　　Admin#2026	管理者	本社
+　　　reception	Admin#2026	受付	　　　　本社
+　　　general	Admin#2026	一般	　　　　大阪支社
+　　　user1   	User1#2026	田中　一般	大阪支社
+      user2   	User2#2026	佐藤　一般	名古屋支社
+　　　user3   	User3#2026	伊藤　一般	福岡支社
+
+
+  ・デモ用テストアカウント（Demo:Enabled=true のとき自動投入）：
+      ID:demo-admin      Pass:Demo#2026   権限:管理者   拠点:本社
+      ID:demo-reception  Pass:Demo#2026   権限:受付     拠点:本社
+      ID:demo-general    Pass:Demo#2026   権限:一般     拠点:大阪支社
+
+  ・ソース内検索キーワード集
+      ★レイアウト調整      : 顧客ごとに調整する多言語文言の箇所
+      TryConsumeAsync       : QR同時読取の排他制御
+      ResolveViewScope      : 履歴・予約の閲覧範囲の決定
+      AddDatabaseProvider   : DB方式の切替登録
+      CalculateExpiresAtUtc : QRコードの有効期限の算出
+      IsRepresentative      : 代表者と同行者の区別
+════════════════════════════════════════════════════════════════════

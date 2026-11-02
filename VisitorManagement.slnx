@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VisitorManagement.Application/VisitorManagement.Application.csproj" />
+    <Project Path="src/VisitorManagement.BatchRunner/VisitorManagement.BatchRunner.csproj" />
+    <Project Path="src/VisitorManagement.Composition/VisitorManagement.Composition.csproj" />
+    <Project Path="src/VisitorManagement.Core/VisitorManagement.Core.csproj" />
+    <Project Path="src/VisitorManagement.Infrastructure.Data.AzureSql/VisitorManagement.Infrastructure.Data.AzureSql.csproj" />
+    <Project Path="src/VisitorManagement.Infrastructure.Data.SqlExpress/VisitorManagement.Infrastructure.Data.SqlExpress.csproj" />
+    <Project Path="src/VisitorManagement.Infrastructure.Data/VisitorManagement.Infrastructure.Data.csproj" />
+    <Project Path="src/VisitorManagement.Infrastructure.Mail/VisitorManagement.Infrastructure.Mail.csproj" />
+    <Project Path="src/VisitorManagement.Infrastructure.Printing/VisitorManagement.Infrastructure.Printing.csproj" />
+    <Project Path="src/VisitorManagement.WebReception/VisitorManagement.WebReception.csproj" />
+    <Project Path="src/VisitorManagement.WinFormsApp/VisitorManagement.WinFormsApp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VisitorManagement.Tests/VisitorManagement.Tests.csproj" />
+  </Folder>
+</Solution>

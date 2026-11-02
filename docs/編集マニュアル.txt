@@ -1,0 +1,1124 @@
+====================================================================
+ 来館者記録管理システム（VisitorManagementSystem）
+ 開発者向け 編集マニュアル ～ 画面追加・機能追加のための実践ガイド ～
+ 作成日: 2026-08-27 ／ 文字コード: UTF-8
+====================================================================
+
+本書は、実際のソースコード（VisitorManagement.Core / Application /
+Infrastructure.* / Composition / WinFormsApp / WebReception / BatchRunner /
+Tests）をもとに作成した「編集マニュアル」です。
+将来、新しい画面や機能を自力で追加・修正できるようにすることを目的として
+います。
+
+※ 記載しているコードは実際に存在するファイルから引用したものです。
+   紙面の都合で省略した箇所は「…」で示しています。
+※ 「プログラム構成と役割.txt」がファイル単位の逆引き辞典、本書が
+   作業手順書という位置づけです。
+※ 設計の正本は「来館者記録管理システム_詳細設計書.docx（版数2.7）」です。
+   本書と設計書に矛盾がある場合は設計書を優先してください。
+
+
+====================================================================
+ 目次
+====================================================================
+  1. システム全体構成
+  2. 技術スタック（言語・フレームワーク・NuGetパッケージ）
+  3. アプリケーション起動の流れ
+  4. 層の役割と配置規則
+  5. データベース関連（スキーマ・Dapper・トランザクション）
+  6. 共通の型・命名規則
+  7. 実例で学ぶ：来館予約（Reservation）の全体フロー
+  8. 【手順書】新しいマスタ画面を1つ追加する（フルセット）
+  9. 【手順書】既存のテーブルに項目を1つ追加する
+ 10. 【手順書】受付Webにページを追加する
+ 11. 権限（RBAC）の実装ルール
+ 12. 多言語対応（日英併記）の実装ルール
+ 13. テストの書き方
+ 14. ビルド・実行・DB適用のコマンド集
+ 15. よくある間違い・注意点チェックリスト
+ 16. 関連ドキュメントの参照先
+
+
+====================================================================
+ 1. システム全体構成
+====================================================================
+
+【ソリューション構成】(VisitorManagement.slnx)
+
+  VisitorManagement.slnx
+   ├─ src\VisitorManagement.Core                        … エンティティ・契約・業務ルール（外部依存なし）
+   ├─ src\VisitorManagement.Application                 … 業務ロジック（サービス層）
+   ├─ src\VisitorManagement.Infrastructure.Data         … Dapper Repository（DB方式共通）
+   ├─ src\VisitorManagement.Infrastructure.Data.SqlExpress … SQL Server Express 用の差分
+   ├─ src\VisitorManagement.Infrastructure.Data.AzureSql   … Azure SQL Database 用の差分
+   ├─ src\VisitorManagement.Infrastructure.Mail         … メール送信
+   ├─ src\VisitorManagement.Infrastructure.Printing     … QRコード生成・ラベル印刷
+   ├─ src\VisitorManagement.Composition                 … DI合成（Provider切替）
+   ├─ src\VisitorManagement.WinFormsApp                 … 管理アプリ（実行exe）
+   ├─ src\VisitorManagement.WebReception                … 受付Web/API（実行exe）
+   ├─ src\VisitorManagement.BatchRunner                 … 定時バッチ（実行exe）
+   └─ tests\VisitorManagement.Tests                     … 単体テスト（xUnit）
+
+【プロジェクト参照関係（依存の向き）】
+
+                          Core
+                            ↑
+        ┌───────────────────┼───────────────────┐
+   Application    Infrastructure.Data    Infrastructure.Mail
+        ↑                   ↑            Infrastructure.Printing
+        │          ┌────────┴────────┐            ↑
+        │      .SqlExpress        .AzureSql        │
+        └───────────────┬───────────────┬──────────┘
+                        Composition
+                             ↑
+        ┌────────────────────┼────────────────────┐
+   WinFormsApp          WebReception          BatchRunner
+
+  ・Core はどこにも依存しない（最も内側の層）。
+  ・Application は Core のみ参照する（インフラを知らない）。
+  ・Infrastructure.* は Core のインターフェースを実装する（依存性逆転）。
+  ・Composition が全部を束ねてDIを組み立てる。
+  ・3つの実行アプリはすべて Composition だけを参照し、
+    同じ AddVisitorManagement(configuration) を呼ぶ。
+
+このため、「新しい画面を作る」は主に実行アプリ側の作業、
+「新しい業務ロジック・データ項目を作る」は
+Core → Application → Infrastructure.Data の順に手を入れる作業になります。
+
+【設計書のプロジェクト構成との差異】
+  設計書4.3節は7プロジェクト構成ですが、実装では次の4つを追加しています。
+    ・Application     … サービス層。設計書に配置先の定義がなく、WinFormsと
+                         受付Webで同一ロジックを共有する必要があるため
+    ・Infrastructure.Printing … ILabelPrinter（設計書19章で新設）の実装配置先
+    ・Composition     … DI合成。Application をインフラ非依存に保つため
+    ・BatchRunner     … タスクスケジューラから呼ぶ実行基盤
+
+
+====================================================================
+ 2. 技術スタック（言語・フレームワーク・NuGetパッケージ）
+====================================================================
+
+  言語/SDK        : C# / .NET 10 (net10.0 / net10.0-windows)
+  管理アプリUI    : WinForms（UseWindowsForms=true）
+                    ★デザイナーは使わず全画面コードビハインド
+  受付WebUI       : ASP.NET Core 10 Razor Pages
+  DB              : SQL Server Express / Azure SQL Database
+  ORM             : Dapper 2.1.79（★手書きSQL。EF Coreのマイグレーションは無い）
+  DIコンテナ      : Microsoft.Extensions.DependencyInjection 10.0.11
+  設定            : Microsoft.Extensions.Configuration（Optionsパターン）
+  テスト          : xUnit 2.9.3
+
+【各プロジェクトの主な NuGet パッケージ】
+
+  VisitorManagement.Core
+    ・外部パッケージなし（純粋な中核層）
+
+  VisitorManagement.Application
+    ・Microsoft.Extensions.Options / Logging.Abstractions /
+      DependencyInjection.Abstractions
+
+  VisitorManagement.Infrastructure.Data
+    ・Dapper 2.1.79
+    ・Microsoft.Data.SqlClient 7.0.2
+    ※db\01_CreateSchema.sql を EmbeddedResource としてリンク同梱
+
+  VisitorManagement.Infrastructure.Data.SqlExpress
+    ・Microsoft.Data.SqlClient
+
+  VisitorManagement.Infrastructure.Data.AzureSql
+    ・Microsoft.Data.SqlClient
+    ・Polly 8.7.0（リトライ）
+    ・Azure.Storage.Blobs（ログアーカイブの保管先）
+
+  VisitorManagement.Infrastructure.Mail
+    ・SendGrid 9.29.3
+    ・MailKit 4.17.0
+
+  VisitorManagement.Infrastructure.Printing
+    ・QRCoder 1.8.0
+    ・PDFsharp 6.2.4（デモ版のPDFプレビュー）
+    ※b-PAC SDK は ProgID の遅延バインディングで呼ぶため NuGet 参照なし
+
+  VisitorManagement.Composition
+    ・System.Security.Cryptography.ProtectedData（DPAPI）
+    ・Microsoft.Extensions.Options.ConfigurationExtensions
+
+  VisitorManagement.WinFormsApp
+    ・Microsoft.Extensions.Hosting / Configuration.Json
+    ※ProtectedData は net10.0-windows の共有フレームワークに含まれるため参照不要
+
+  VisitorManagement.BatchRunner
+    ・Microsoft.Extensions.Configuration.Json / .EnvironmentVariables
+    ・Microsoft.Extensions.Logging.Console
+
+  VisitorManagement.Tests
+    ・xunit 2.9.3 / Microsoft.NET.Test.Sdk 17.14.1
+
+
+====================================================================
+ 3. アプリケーション起動の流れ
+====================================================================
+
+────────────────────────────────────────────────────
+ 3.1 管理アプリ（WinFormsApp\Program.cs）
+────────────────────────────────────────────────────
+
+  [STAThread]
+  private static void Main()
+  {
+      // 名前空間 VisitorManagement.Application と衝突するため
+      // System.Windows.Forms.Application を明示する
+      ApplicationConfiguration.Initialize();
+      System.Windows.Forms.Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+
+      ServiceProvider? provider = null;
+      try
+      {
+          provider = BuildServiceProvider();
+          RunApplication(provider);
+      }
+      catch (Exception ex) { MessageBox.Show(...); }
+      finally { provider?.Dispose(); }
+  }
+
+  ■ BuildServiceProvider の流れ
+    ① 設定の読込（優先順は下ほど強い）
+         appsettings.json
+         appsettings.Local.json         ← 導入先ごとの上書き（gitignore対象）
+         環境変数 VISITORMGMT_*
+    ② DpapiSecretProtector.UnprotectConfiguration(configuration)
+         "ENC:" で始まる値を DPAPI で復号して設定へ書き戻す
+    ③ services.AddLogging(...)  FileLoggerProvider（logs\app-YYYYMMDD.log）
+    ④ services.AddVisitorManagement(configuration)   ★全サービスの登録
+    ⑤ services.AddSingleton<AppSession>()            ログインセッション
+
+  ■ RunApplication の流れ
+    ① provider.InitializeDemoAsync()
+         Demo:Enabled=true のときのみスキーマ作成＋シード投入
+    ② 操作ユーザーが0件なら InitialAdminSetupForm を表示
+    ③ LoginForm を表示（OKでなければ終了）
+    ④ Application.Run(new MainForm(provider))
+
+────────────────────────────────────────────────────
+ 3.2 受付Web（WebReception\Program.cs）
+────────────────────────────────────────────────────
+
+  var builder = WebApplication.CreateBuilder(args);
+
+  builder.Configuration
+      .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false)
+      .AddEnvironmentVariables("VISITORMGMT_");
+
+  DpapiSecretProtector.UnprotectConfiguration(builder.Configuration);
+
+  builder.Services.AddVisitorManagement(builder.Configuration);   // ★管理アプリと同一
+  builder.Services.AddRazorPages();
+  builder.Services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
+  builder.Services
+      .AddAuthentication(OperatorPrincipal.AuthenticationScheme)
+      .AddCookie(OperatorPrincipal.AuthenticationScheme, options => { … });
+
+  var app = builder.Build();
+  await app.Services.InitializeDemoAsync();     // デモ版の初期化
+  …
+  app.MapRazorPages();
+  app.MapAccessApi();                           // POST /api/access/scan
+  app.Run();
+
+────────────────────────────────────────────────────
+ 3.3 DI登録の中身（Composition\ServiceCollectionExtensions.cs）
+────────────────────────────────────────────────────
+
+  public static IServiceCollection AddVisitorManagement(
+      this IServiceCollection services, IConfiguration configuration)
+  {
+      DapperConfiguration.Configure();          // 型マッピング（DateOnly等）
+
+      services.AddVisitorManagementSettings(configuration);  // Optionsバインド
+      services.AddDatabaseProvider(configuration);           // ★DB方式の切替
+      services.AddRepositories();
+      services.AddMailProvider(configuration);               // ★メール方式の切替
+      services.AddPrintingProvider(configuration);           // ★印刷方式の切替
+      services.AddArchiveStorage(configuration);             // ★保管先の切替
+      services.AddApplicationServices();
+      return services;
+  }
+
+  ★DB方式の切替はここだけ（設計書4.4節そのまま）
+
+  private static IServiceCollection AddDatabaseProvider(
+      this IServiceCollection services, IConfiguration configuration)
+  {
+      var provider = configuration[$"{DatabaseSettings.SectionName}:Provider"];
+
+      if (string.Equals(provider, DatabaseProviderNames.AzureSql,
+                        StringComparison.OrdinalIgnoreCase))
+      {
+          services.AddSingleton<IDbConnectionFactory, AzureSqlConnectionFactory>();
+          services.AddSingleton<IDbRetryPolicy, AzureSqlRetryPolicy>();
+          services.AddSingleton<IBackupService, AzureSqlBackupService>();
+      }
+      else
+      {
+          services.AddSingleton<IDbConnectionFactory, SqlExpressConnectionFactory>();
+          services.AddSingleton<IDbRetryPolicy, NoRetryPolicy>();
+          services.AddSingleton<IBackupService, SqlExpressBackupService>();
+      }
+
+      services.AddSingleton<IDbSessionFactory, DbSessionFactory>();
+      services.AddSingleton<IDatabaseInitializer, DatabaseInitializer>();
+      return services;
+  }
+
+
+====================================================================
+ 4. 層の役割と配置規則
+====================================================================
+
+  ┌──────────────────────┬──────────────────────────────────────────┐
+  │ 層                   │ 置いてよいもの／置いてはいけないもの      │
+  ├──────────────────────┼──────────────────────────────────────────┤
+  │ Core                 │ ○ エンティティ・Enum・DTO・インターフェース│
+  │                      │ ○ 業務ルール(VisitRules)・RBAC(Permission…)│
+  │                      │ ○ 設定クラス(Settings)                    │
+  │                      │ × SQL・HTTP・ファイルIO・UI               │
+  ├──────────────────────┼──────────────────────────────────────────┤
+  │ Application          │ ○ 業務ロジック（サービス）                │
+  │                      │ ○ トランザクションの境界                  │
+  │                      │ ○ 権限判定の呼び出し                      │
+  │                      │ × SQL文（Repository経由にする）           │
+  │                      │ × 画面・HTTP依存                          │
+  ├──────────────────────┼──────────────────────────────────────────┤
+  │ Infrastructure.Data  │ ○ SQL文・Dapper呼び出し                   │
+  │                      │ × 業務判断（「◯◯なら××する」）         │
+  ├──────────────────────┼──────────────────────────────────────────┤
+  │ Infrastructure.      │ ○ DB方式ごとの差分だけ                    │
+  │   SqlExpress/AzureSql│   （接続・リトライ・バックアップ・保管先） │
+  │                      │ × Repository・SQL文（共通側に置く）       │
+  ├──────────────────────┼──────────────────────────────────────────┤
+  │ WinFormsApp /        │ ○ 画面・入力チェック（利便性のための一次） │
+  │ WebReception         │ ○ 表示整形                                │
+  │                      │ × 業務ルール（サービス層に置く）          │
+  └──────────────────────┴──────────────────────────────────────────┘
+
+  ★入力チェックは「画面（一次）」と「サービス層（本番）」の二重で行います。
+    画面のチェックを迂回されてもサービス層で必ず弾かれるようにしてください。
+    権限判定も同じ考え方で、UIで隠すだけでなくサービス層とAPIで必ず判定します。
+
+
+====================================================================
+ 5. データベース関連（スキーマ・Dapper・トランザクション）
+====================================================================
+
+────────────────────────────────────────────────────
+ 5.1 スキーマの管理
+────────────────────────────────────────────────────
+  ★本システムは Dapper（手書きSQL）であり、EF Core のマイグレーションは
+    ありません。スキーマの正本は次のファイルです。
+
+      db\01_CreateSchema.sql
+
+  ・IF OBJECT_ID(...) IS NULL でテーブルを作る冪等スクリプトです。
+  ・インデックスはテーブル作成とは別の冪等ブロックにしています。
+    （既存DBへ再実行したとき、不足しているインデックスだけが追加されます）
+  ・このファイルは Infrastructure.Data の .csproj から EmbeddedResource として
+    リンク同梱され、デモ版のスキーマ自動作成に再利用されます（二重管理しない）。
+
+      <EmbeddedResource Include="..\..\db\01_CreateSchema.sql"
+                        LogicalName="VisitorManagement.Infrastructure.Data.Sql.CreateSchema.sql" />
+
+  ・既存DBに列を追加する場合は ALTER 文を別ファイル（例 db\03_AlterXxx.sql）で
+    用意し、01_CreateSchema.sql にも同じ定義を反映してください。
+
+────────────────────────────────────────────────────
+ 5.2 ★QUOTED_IDENTIFIER の注意（必ず読むこと）
+────────────────────────────────────────────────────
+  dbo.Visitors にはフィルター選択インデックスがあります。
+
+      CREATE UNIQUE NONCLUSTERED INDEX UQ_Visitors_GroupRepresentative
+          ON dbo.Visitors (ReservationGroupId) WHERE IsRepresentative = 1;
+
+  （1予約グループに代表者は1名だけ、をDB側でも保証するため）
+
+  SQL Server の仕様上、フィルター選択インデックスを持つテーブルへの
+  INSERT / UPDATE / DELETE は QUOTED_IDENTIFIER が ON でなければ
+  エラー 1934 で失敗します。
+
+    ・アプリ  : Microsoft.Data.SqlClient は既定 ON のため対応不要
+    ・sqlcmd  : 既定 OFF。★-I オプションを必ず付ける
+    ・スクリプト: 冒頭で SET QUOTED_IDENTIFIER ON; を実行する
+
+────────────────────────────────────────────────────
+ 5.3 Dapper の型マッピング
+────────────────────────────────────────────────────
+  Infrastructure.Data\DapperConfiguration.cs で3つのハンドラを登録しています。
+  起動時に DapperConfiguration.Configure() が1回だけ呼ばれます
+  （AddVisitorManagement の先頭）。
+
+    DateOnlyTypeHandler     date 列 ↔ DateOnly（Visitors.VisitDate）
+    TimeOnlyTypeHandler     time 列 ↔ TimeOnly（VisitTimeFrom / VisitTimeTo）
+    UtcDateTimeTypeHandler  datetime2 の UTC 往復を保証
+
+  ★日時はすべて UTC で保存します。
+    SQL Server の datetime2 は種別（Kind）を保持しないため、
+    UtcDateTimeTypeHandler が読取時に DateTimeKind.Utc を明示します。
+    画面表示は HistoryService.ToLocalText(...) でローカル時刻へ変換します。
+
+────────────────────────────────────────────────────
+ 5.4 Repository の書き方
+────────────────────────────────────────────────────
+  すべての Repository は RepositoryBase を継承します。
+
+  public sealed class CompanyRepository(
+      IDbSessionFactory sessionFactory, IDbRetryPolicy retryPolicy)
+      : RepositoryBase(sessionFactory, retryPolicy), ICompanyRepository
+  {
+      private const string SelectColumns = """
+          SELECT  CompanyId, CompanyName, Address, Tel
+          FROM    dbo.Companies
+          """;
+
+      public Task<Company?> GetByIdAsync(int companyId, IDbSession? session = null)
+          => ExecuteAsync(session, s => s.Connection.QuerySingleOrDefaultAsync<Company>(
+              new CommandDefinition($"{SelectColumns} WHERE CompanyId = @CompanyId;",
+                  new { CompanyId = companyId }, s.Transaction)));
+  }
+
+  ■ RepositoryBase.ExecuteAsync の役割
+    ・session が null      → 自前でセッションを作り、リトライ方針を適用する
+    ・session が渡された   → 呼び出し側のトランザクション内なので
+                             ★リトライを適用せずそのまま実行する
+                             （途中でリトライすると整合性を壊すため）
+
+  ■ 動的な検索条件（SearchAsync）の書き方
+    StringBuilder で WHERE を組み立て、DynamicParameters に全パラメータを
+    無条件で追加します（未使用でもエラーになりません）。
+
+      var sql = new StringBuilder(SelectColumns.Replace("SELECT  ", $"SELECT  {top}"));
+      sql.AppendLine().Append("WHERE 1 = 1");
+      if (!string.IsNullOrWhiteSpace(condition.VisitorName))
+          sql.AppendLine().Append("  AND v.VisitorName LIKE @VisitorNamePattern");
+      …
+      parameters.Add("VisitorNamePattern", $"%{EscapeLike(condition.VisitorName)}%");
+
+    ★LIKE検索は必ず VisitorRepository.EscapeLike でワイルドカードを
+      エスケープしてください（% _ [ をそのまま渡さない）。
+    ★TOP は SELECT TOP (@Max) にせず、C#側で文字列に埋め込みます
+      （@Max が NULL のとき SQL エラーになるため）。
+
+────────────────────────────────────────────────────
+ 5.5 トランザクションの書き方
+────────────────────────────────────────────────────
+  複数テーブルにまたがる更新は、サービス層で IDbSession を作って
+  各 Repository に渡します。
+
+      using (var session = sessionFactory.CreateSession(beginTransaction: true))
+      {
+          await visitorRepository.CreateAsync(representative, session);
+          foreach (var companion in companions)
+              await visitorRepository.CreateAsync(companion, session);
+
+          await qrTokenRepository.CreateAsync(token, session);
+          session.Commit();
+      }
+
+  ・Commit を呼ばずに using を抜けると自動的にロールバックされます。
+  ・トランザクション境界は必ずサービス層に置きます（Repositoryに置かない）。
+
+
+====================================================================
+ 6. 共通の型・命名規則
+====================================================================
+
+────────────────────────────────────────────────────
+ 6.1 命名規則
+────────────────────────────────────────────────────
+  ・クラス／メソッド／プロパティ : PascalCase
+  ・ローカル変数／引数           : camelCase
+  ・privateフィールド            : _camelCase
+  ・インターフェース             : I + 名詞（IVisitorRepository）
+  ・非同期メソッド               : 末尾 Async
+  ・テーブル名                   : マスタは複数形（Sites/Operators/Companies）
+                                   トランザクションも複数形（Visitors/AccessLogs）
+  ・列名                         : PascalCase（エンティティのプロパティ名と一致）
+  ・インデックス                 : IX_テーブル_列 ／ 一意は UQ_テーブル_列
+  ・コメント                     : ★日本語。処理の意図（なぜ）を書く
+  ・インデント                   : スペース4つ（C#）／スペース2つ（JSON・JS）
+
+────────────────────────────────────────────────────
+ 6.2 例外の使い分け
+────────────────────────────────────────────────────
+  BusinessRuleException      業務ルール違反（入力不備・状態不整合）。
+                             メッセージをそのままユーザーへ表示してよい。
+                               throw new BusinessRuleException("代表者の氏名を入力してください。");
+
+  PermissionDeniedException  権限不足。
+                               throw PermissionDeniedException.ForOperation("手動退館処理");
+
+  それ以外の例外              技術的な失敗。ユーザーには詳細を見せず、
+                             UiTheme.ShowError / Error ページで丸めて表示する。
+
+  ★UiTheme.ShowError は例外の種別で文言を切り替えます。
+      BusinessRuleException / PermissionDeniedException → メッセージをそのまま表示
+      SqlException → 「一時的にデータベースに接続できません。…」
+      その他       → 「処理中にエラーが発生しました。」＋例外メッセージ
+
+────────────────────────────────────────────────────
+ 6.3 覚えておくと便利な共通処理
+────────────────────────────────────────────────────
+  VisitRules.CalculateExpiresAtUtc(date, time)  QR有効期限（+2時間）
+  VisitRules.CalculateValidFromUtc(date, time)  QR有効開始（-30分）
+  VisitRules.CanCancel(status)                  キャンセル可否
+  VisitRules.CanResendMail(status, type)        メール再送信可否
+  PermissionPolicy.CanXxx(ctx)                  権限判定
+  PermissionPolicy.ApplyViewScope(ctx, cond)    閲覧範囲を検索条件へ反映
+  HistoryService.ToText(...)                    ステータス等の日本語表示名
+  HistoryService.ToLocalText(utc)               UTC → ローカル時刻表示
+  HistoryService.Escape(value)                  CSVフィールドのエスケープ
+  UiTheme.CreateGrid() / TextColumn(...)        一覧グリッドの生成
+  UiTheme.RunWithWaitCursorAsync(form, action)  処理中カーソル
+
+
+====================================================================
+ 7. 実例で学ぶ：来館予約（Reservation）の全体フロー
+====================================================================
+
+「予約を登録すると、QRコードが発行され、メールが送信される」までを
+どのファイルがどう連携しているかを追いかけます。
+
+────────────────────────────────────────────────────
+ ① 画面：WinFormsApp\Forms\ReservationEditForm.cs
+────────────────────────────────────────────────────
+  入力値を ReservationInput（DTO）に詰めてサービスを呼ぶだけ。
+  業務判断はここに書きません。
+
+      var input = new ReservationInput
+      {
+          SiteId = siteId.Value,
+          VisitDate = DateOnly.FromDateTime(_visitDatePicker.Value),
+          VisitTimeFrom = TimeOnly.FromDateTime(_timeFromPicker.Value),
+          …
+          Representative = new ReservationMemberInput { … },
+          Companions = [.. _companions.Where(c => !string.IsNullOrWhiteSpace(c.VisitorName))
+                                      .Select(c => new ReservationMemberInput { … })],
+      };
+
+      result = await _reservationService.CreateAsync(input, _ctx);
+
+────────────────────────────────────────────────────
+ ② DTO：Core\Dtos\ReservationInput.cs
+────────────────────────────────────────────────────
+  代表者1名＋同行者リストという構造をそのまま表現します。
+  ★事前予約と当日受付で同じDTOを使います（設計書6.6節「特別な例外フローを
+    設けない」を素直に実装したもの）。
+
+────────────────────────────────────────────────────
+ ③ サービス：Application\Services\ReservationService.CreateAsync
+────────────────────────────────────────────────────
+  処理の順序が重要です。
+
+    1) 権限チェック
+         if (!PermissionPolicy.CanCreateReservation(ctx))
+             throw PermissionDeniedException.ForOperation("来館予約の登録");
+         ※編集・キャンセルでは、これに加えて対象予約の代表者行に対して
+           CanOperateOnReservation(ctx, representative) も判定する
+           （一般ロールは自分が登録した予約のみ操作可）。
+
+    2) 入力検証（ValidateAsync）
+         拠点の実在・有効性、代表者氏名、事前予約のメール必須、
+         時刻の前後、同行者の氏名
+
+    3) エンティティ組み立て
+         groupId = Guid.NewGuid();
+         representative = BuildVisitor(..., isRepresentative: true, ...);
+         companions     = input.Companions.Select(m => BuildVisitor(..., false, ...));
+
+         ★同行者の VisitorEmail は必ず null にする（設計書16章 確認事項No.1）
+           VisitorEmail = isRepresentative ? Trim(member.VisitorEmail) : null,
+
+    4) QRトークンを1件だけ作る（★代表者の VisitorId に紐づける）
+         ExpiresAt = VisitRules.CalculateExpiresAtUtc(input.VisitDate, input.VisitTimeFrom)
+
+    5) 1トランザクションで登録（5.5節参照）
+
+    6) QRコード画像を生成
+         qrCodePng = qrCodeImageGenerator.GeneratePng(token.TokenValue);
+
+    7) メール送信（★当日受付は予約登録者宛の控えを省略）
+         var sendToRegistrant = input.ReservationType == ReservationType.Advance;
+         await mailDeliveryService.SendInvitationAsync(
+             group, registeredBy, qrCodePng, MailType.VisitInvitation, sendToRegistrant);
+
+  ★メール送信は「トランザクションの外」で行います。
+    送信に時間がかかってもDBのロックを保持しないためです。
+
+────────────────────────────────────────────────────
+ ④ メール：Application\Services\MailDeliveryService.cs
+────────────────────────────────────────────────────
+  宛先ごとに送信し、成功・失敗のどちらでも MailHistory に1件記録します。
+
+      catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
+      {
+          // 送信失敗は予約登録の成否に影響させず、履歴に失敗として残す
+          await RecordAsync(representative.VisitorId, mailType, recipientType, ex.Message);
+          return new MailDeliveryResult(recipientType, address, false, ex.Message);
+      }
+
+  ★catch は種別を限定しています。想定外の例外まで握り潰さないためです。
+
+────────────────────────────────────────────────────
+ ⑤ Repository：Infrastructure.Data\Repositories\VisitorRepository.cs
+────────────────────────────────────────────────────
+  SQLを書くのはここだけ。DB方式による分岐は一切ありません。
+
+────────────────────────────────────────────────────
+ ⑥ 読み取り側：Application\Services\AccessService.ScanAsync
+────────────────────────────────────────────────────
+  同じデータを受付Webから使う側の流れです。
+
+    1) トークン取得（GetByTokenValueAsync）
+    2) グループ取得（GetByGroupIdAsync）
+    3) 検証：IsValid → キャンセル → UsedCount>=2 → 期限切れ → 受付時間前
+         いずれもエラー時は代表者行に AccessLogs を1件記録して終了
+    4) ★TryConsumeAsync で排他的に読取回数を加算
+         UPDATE ... SET UsedCount = UsedCount + 1
+         WHERE TokenId = @TokenId AND UsedCount = @ExpectedUsedCount
+         → 更新件数が0なら他端末が先に処理済み＝競合として拒否
+    5) グループ全員のステータスを一括更新
+    6) グループ内の来館者ごとに AccessLogs を1件ずつ記録
+    7) Commit
+
+
+====================================================================
+ 8. 【手順書】新しいマスタ画面を1つ追加する（フルセット）
+====================================================================
+
+例として「部署マスタ（Departments）」を追加する手順を示します。
+会社名マスタ（Company）が最も単純な実例なので、それを写経するのが近道です。
+
+────────────────────────────────────────────────────
+ 手順1: テーブルを追加する
+────────────────────────────────────────────────────
+  db\01_CreateSchema.sql に追記（冪等ブロックの形をそろえる）
+
+      IF OBJECT_ID(N'dbo.Departments', N'U') IS NULL
+      BEGIN
+          CREATE TABLE dbo.Departments
+          (
+              DepartmentId    int             IDENTITY(1,1) NOT NULL,
+              DepartmentName  nvarchar(100)   NOT NULL,
+              CONSTRAINT PK_Departments PRIMARY KEY CLUSTERED (DepartmentId)
+          );
+      END
+      GO
+
+  既存DBへは ALTER 用のスクリプトを別途用意して適用します。
+
+      sqlcmd -S .\SQLEXPRESS -E -I -d VisitorMgmt -i db\01_CreateSchema.sql
+
+────────────────────────────────────────────────────
+ 手順2: エンティティを追加する
+────────────────────────────────────────────────────
+  src\VisitorManagement.Core\Entities\Department.cs
+
+      namespace VisitorManagement.Core.Entities;
+
+      /// <summary>
+      /// 部署マスタ（Departments）。
+      /// </summary>
+      public sealed class Department
+      {
+          /// <summary>主キー（IDENTITY）</summary>
+          public int DepartmentId { get; set; }
+
+          /// <summary>部署名</summary>
+          public string DepartmentName { get; set; } = string.Empty;
+      }
+
+────────────────────────────────────────────────────
+ 手順3: Repositoryのインターフェースを追加する
+────────────────────────────────────────────────────
+  src\VisitorManagement.Core\Abstractions\IDepartmentRepository.cs
+
+      public interface IDepartmentRepository
+      {
+          Task<Department?> GetByIdAsync(int departmentId, IDbSession? session = null);
+          Task<IReadOnlyList<Department>> GetAllAsync(IDbSession? session = null);
+          Task<int> CreateAsync(Department department, IDbSession? session = null);
+          Task UpdateAsync(Department department, IDbSession? session = null);
+          Task DeleteAsync(int departmentId, IDbSession? session = null);
+      }
+
+  ★引数の末尾に IDbSession? session = null を付けるのが本システムの規約です。
+    これによりトランザクション内・外の両方から呼べます。
+
+────────────────────────────────────────────────────
+ 手順4: Repositoryを実装する
+────────────────────────────────────────────────────
+  src\VisitorManagement.Infrastructure.Data\Repositories\DepartmentRepository.cs
+  → CompanyRepository.cs をコピーして名前と列を置き換えるのが最短です。
+
+────────────────────────────────────────────────────
+ 手順5: サービスに機能を追加する
+────────────────────────────────────────────────────
+  MasterDataService.cs に追記します（会社名・拠点と同じ場所にまとめる）。
+
+      public async Task<int> CreateDepartmentAsync(Department department, OperatorContext ctx)
+      {
+          ArgumentNullException.ThrowIfNull(department);
+          RequireCompanyPermission(ctx);          // 権限判定（管理者のみ）
+
+          if (string.IsNullOrWhiteSpace(department.DepartmentName))
+              throw new BusinessRuleException("部署名を入力してください。");
+
+          var id = await departmentRepository.CreateAsync(department);
+          department.DepartmentId = id;
+
+          await auditService.RecordInsertAsync("Departments", id, department, ctx);
+          return id;
+      }
+
+  ★マスタの変更は必ず AuditService で監査ログに記録します（設計書11.5節）。
+
+────────────────────────────────────────────────────
+ 手順6: DIに登録する
+────────────────────────────────────────────────────
+  Composition\ServiceCollectionExtensions.cs の AddRepositories に1行追加
+
+      services.AddSingleton<IDepartmentRepository, DepartmentRepository>();
+
+  新しいサービスクラスを作った場合は AddApplicationServices にも追加します。
+
+────────────────────────────────────────────────────
+ 手順7: 画面を追加する
+────────────────────────────────────────────────────
+  WinFormsApp\Forms\DepartmentMasterForm.cs
+  → CompanyMasterForm.cs をコピーするのが最短です。骨格は次のとおり。
+
+      public sealed class DepartmentMasterForm : Form
+      {
+          private readonly MasterDataService _masterDataService;
+          private readonly OperatorContext _ctx;
+          private readonly DataGridView _grid = UiTheme.CreateGrid();
+          private readonly BindingSource _bindingSource = [];
+          …
+
+          public DepartmentMasterForm(IServiceProvider provider)   // ★この形にそろえる
+          {
+              _masterDataService = provider.GetRequiredService<MasterDataService>();
+              _ctx = provider.GetRequiredService<AppSession>().Current;
+
+              Text = $"{UiTheme.AppName} - 部署マスタ管理";
+              ClientSize = new Size(900, 560);
+              UiTheme.Apply(this);
+
+              BuildLayout();
+              Load += async (_, _) => await LoadAsync().ConfigureAwait(true);
+          }
+
+          private void BuildLayout() { … }      // UIはすべてコードで組む
+          private async Task LoadAsync()   { … }
+          private async Task SaveAsync()   { … }
+      }
+
+  ★コンストラクタの引数を IServiceProvider 1つにそろえてください。
+    MainForm.ShowDialog<TForm>() が Activator.CreateInstance(typeof(TForm), _provider)
+    で生成するためです。
+
+  ★非同期処理は必ず try/catch で UiTheme.ShowError(this, ex) を呼びます。
+    WinForms の async void ハンドラで例外を投げるとアプリが落ちます。
+
+────────────────────────────────────────────────────
+ 手順8: メニューに追加する
+────────────────────────────────────────────────────
+  WinFormsApp\Forms\MainForm.cs の3か所に追記します。
+
+  ① フィールド
+      private readonly ToolStripMenuItem _departmentMasterMenu = new("部署マスタ管理(&D)");
+
+  ② BuildLayout
+      masterMenu.DropDownItems.AddRange([… , _departmentMasterMenu]);
+      _departmentMasterMenu.Click += (_, _) => ShowDialog<DepartmentMasterForm>();
+
+      // ショートカットボタンの配列にも追加する
+      ("部署マスタ管理", _departmentMasterMenu),
+
+  ③ ApplyPermissions
+      _departmentMasterMenu.Enabled = PermissionPolicy.CanManageCompanies(ctx);
+
+  ★ボタンはメニュー項目の Enabled にデータバインドされ、
+    Enabled=false のとき自動的に非表示になります。権限制御は
+    ApplyPermissions の1行だけで完結します。
+
+────────────────────────────────────────────────────
+ 手順9: テストを追加する
+────────────────────────────────────────────────────
+  tests\VisitorManagement.Tests\ に単体テストを追加します（13章参照）。
+
+────────────────────────────────────────────────────
+ 手順10: ドキュメントを更新する
+────────────────────────────────────────────────────
+  ・docs\プログラム構成と役割.txt   … ファイル一覧と編集ガイド
+  ・docs\動作検証確認項目.txt       … 確認項目
+  ・docs\簡易マニュアル.txt         … 利用者向けの説明
+
+
+====================================================================
+ 9. 【手順書】既存のテーブルに項目を1つ追加する
+====================================================================
+
+例：Visitors に「所属部署（BelongingDepartment）」を追加する。
+
+  ① db\01_CreateSchema.sql の CREATE TABLE に列を追加
+       BelongingDepartment nvarchar(50) NULL,
+     既存DB用の ALTER スクリプトも用意する
+       ALTER TABLE dbo.Visitors ADD BelongingDepartment nvarchar(50) NULL;
+
+  ② Core\Entities\Visitor.cs にプロパティを追加
+       /// <summary>所属部署</summary>
+       public string? BelongingDepartment { get; set; }
+
+  ③ Infrastructure.Data\Repositories\VisitorRepository.cs の
+     ★4か所すべてを直す（1つでも漏れると実行時エラーになる）
+       (1) SelectColumns の SELECT 句に列を追加
+       (2) CreateAsync の INSERT 句の列リストに追加
+       (3) CreateAsync の VALUES に @BelongingDepartment を追加
+       (4) CreateAsync の匿名オブジェクト（パラメータ）に追加
+           ★ここを忘れると
+             「スカラー変数 "@BelongingDepartment" を宣言してください」
+             という実行時エラーになります（実際に踏んだ不具合）。
+       (5) UpdateAsync の SET 句とパラメータにも同様に追加
+
+  ④ 入力に使うなら Core\Dtos\ReservationInput.cs（ReservationMemberInput）に追加し、
+     ReservationService.BuildVisitor / ApplyMember に反映する
+
+  ⑤ 画面に出すなら
+       WinFormsApp\Forms\ReservationEditForm.cs（入力欄）
+       WinFormsApp\Forms\ReservationListForm.cs（一覧の列とReservationRow）
+
+  ⑥ CSV出力に出すなら Application\Services\HistoryService.ToCsv を更新
+     （★ヘッダー行と明細行の両方を直す）
+
+  ⑦ テストを更新・追加する
+
+
+====================================================================
+ 10. 【手順書】受付Webにページを追加する
+====================================================================
+
+  ① WebReception\Pages\Xxx.cshtml と Xxx.cshtml.cs を追加
+
+      [Authorize]                                   // ★認証必須
+      public sealed class XxxModel(SomeService service) : PageModel
+      {
+          public void OnGet()
+          {
+              var ctx = OperatorPrincipal.ToOperatorContext(User);   // ★操作ユーザー取得
+              if (!PermissionPolicy.CanUseReception(ctx)) { … }      // ★権限判定
+          }
+      }
+
+  ② 日英併記が必要な画面なら Resources\ReceptionTexts.cs に文言を追加する
+     （12章参照。行頭に「// ★レイアウト調整」を付ける）
+
+  ③ 画面から呼ぶAPIを増やす場合は Endpoints\ に登録し、Program.cs から Map する
+
+      app.MapPost("/api/xxx", XxxAsync).RequireAuthorization();
+
+     ★JSON POST は antiforgery の自動検証対象外です。
+       AccessApi.cs と同様に IAntiforgery.ValidateRequestAsync を明示的に呼び、
+       画面側は fetch のヘッダーに X-CSRF-TOKEN を付けてください。
+
+           await antiforgery.ValidateRequestAsync(httpContext);
+
+  ④ Razor の @section Scripts はページ直下に書く
+     （@if の中に入れても動作しますが、条件分岐と組み合わせるときは
+       レンダリング順に注意してください）
+
+
+====================================================================
+ 11. 権限（RBAC）の実装ルール
+====================================================================
+
+  権限判定は必ず Core\Security\PermissionPolicy.cs の判定メソッドを使います。
+  各画面・各サービスで if (role == ...) と書かないでください。
+
+  ■ 判定メソッド（設計書11.6節の権限マトリクスと1対1）
+      CanCreateReservation    来館予約の登録（全ロール）
+      CanEditReservation      来館予約の編集・キャンセル（全ロール）
+      CanDeleteReservation    来館予約の削除（管理者・受付のみ）
+      CanOperateOnReservation 対象の予約を操作できるか（一般は自分の登録分のみ）
+                              ★一般ロールに編集・キャンセルを許可したため、
+                                ロール判定に加えて必ずこの行単位判定も併用すること。
+      CanUseReception         当日受付登録・入退館受付
+      CanManualCheckOut       手動退館処理
+      CanResendMail           メール再送信
+      CanManageCompanies      会社名マスタ管理
+      CanManageSites          拠点マスタ管理
+      CanManageOperators      操作ユーザー管理
+      CanViewSystemSettings   システム設定確認
+      CanResetDemoData        サンプルデータ初期化
+
+  ■ 閲覧範囲（履歴・予約）
+      ResolveViewScope(ctx, requestedSiteId) → (SiteId, CreatedByOperatorId)
+        管理者 : (画面で選択した拠点, null)      … 全拠点・全件
+        受付   : (自分の所属拠点, null)          … 他拠点は選べない
+        一般   : (画面で選択した拠点, 自分のId)  … 自分が登録した予約のみ
+
+      検索条件へは ApplyViewScope で反映します。
+
+          PermissionPolicy.ApplyViewScope(ctx, condition);
+          return visitorRepository.SearchAsync(condition);
+
+  ■ 実装の3層構造（★UIだけに頼らない）
+      1) 画面    メニュー・ボタンを非表示／非活性にする
+      2) サービス PermissionDeniedException を投げる
+      3) API     403 を返す（受付Webの /api/access/scan 等）
+
+    実際、一般ロールで /api/access/scan を直接呼ぶと 403 が返ることを
+    検証済みです（docs\動作検証確認項目.txt 14章）。
+
+  ■ 新しい権限を足したいとき
+      ① PermissionPolicy に CanXxx メソッドを追加
+      ② サービス層で判定して PermissionDeniedException を投げる
+      ③ 画面の ApplyPermissions に反映
+      ④ tests\PermissionPolicyTests.cs にロール3種分のテストを追加
+
+
+====================================================================
+ 12. 多言語対応（日英併記）の実装ルール
+====================================================================
+
+  ■ 対象範囲（設計書2.5節・6.12節・16章 確認事項No.6）
+      ○ 受付Webの入力画面（当日受付登録画面。入力エラーメッセージを含む）
+      ○ 来館案内メールの定型文
+      × QRコード読取結果表示画面（日本語のみ）
+      × WinForms管理画面（日本語のみ）
+
+  ■ 方式
+      言語切替UIは設けず、同一画面・同一文面の中に日本語と英語を併記します。
+
+          public const string LabelVisitorName = "お名前 / Name";
+
+  ■ 文言の置き場所
+      受付Web : WebReception\Resources\ReceptionTexts.cs
+                  ・ReceptionTexts       … 日英併記（当日受付登録画面）
+                  ・ReceptionResultTexts … 日本語のみ（読取結果画面）
+      メール   : Infrastructure.Mail\MailTemplates.cs
+
+  ■ ★「// ★レイアウト調整」コメント（設計書18章 確認事項No.3）
+      顧客ごとに文言を調整できるよう、対象行の文頭にこのコメントを付けます。
+
+          // ★レイアウト調整 当日受付登録画面のタイトル
+          public const string WalkInTitle = "当日受付登録 / Walk-in Registration";
+
+      導入時は「★レイアウト調整」でソース全文検索すれば調整箇所が一覧できます。
+      新しい文言を追加するときも必ず同じ形式で付けてください。
+
+      ※英訳文言は管理画面からの編集項目にはしません（設計書17章 確認事項No.5）。
+        .resx ではなく C# の定数にしているのは、行単位でコメントを付けられる
+        形式が要件だったためです。
+
+
+====================================================================
+ 13. テストの書き方
+====================================================================
+
+────────────────────────────────────────────────────
+ 13.1 基本方針（設計書12.3節）
+────────────────────────────────────────────────────
+  ・DBを使わない純粋なロジック（VisitRules / PermissionPolicy /
+    PasswordHasher / LogArchiveService の算出 / HistoryService のCSV）は
+    そのまま単体テストにできます。
+  ・DBを伴うサービス（AccessService 等）は Fakes\InMemoryRepositories.cs の
+    インメモリ実装を使います。
+  ・テストメソッド名は日本語で「どう振る舞うべきか」を書きます。
+
+      [Fact]
+      public async Task 一回目の読取でグループ全員が入館中になる()
+
+────────────────────────────────────────────────────
+ 13.2 インメモリのフェイクを使う
+────────────────────────────────────────────────────
+  tests\VisitorManagement.Tests\Fakes\InMemoryRepositories.cs に
+  FakeDbSessionFactory / FakeVisitorRepository / FakeQrTokenRepository /
+  FakeAccessLogRepository を用意しています。
+
+      public sealed class AccessServiceTests
+      {
+          private readonly FakeDbSessionFactory _sessionFactory = new();
+          private readonly FakeVisitorRepository _visitorRepository = new();
+          …
+          public AccessServiceTests()
+          {
+              _service = new AccessService(
+                  _sessionFactory, _visitorRepository, _qrTokenRepository,
+                  _accessLogRepository, NullLogger<AccessService>.Instance);
+          }
+      }
+
+  ★新しい Repository を作ったら、対応するフェイクもここに追加してください。
+
+────────────────────────────────────────────────────
+ 13.3 internal のメソッドをテストする
+────────────────────────────────────────────────────
+  対象プロジェクトの .csproj に次を追加します。
+
+      <ItemGroup>
+        <InternalsVisibleTo Include="VisitorManagement.Tests" />
+      </ItemGroup>
+
+  現在は Application と Infrastructure.Data に設定済みです。
+
+────────────────────────────────────────────────────
+ 13.4 境界値は Theory で書く
+────────────────────────────────────────────────────
+      [Theory]
+      [InlineData(-30, true)]   // 開始境界（30分前ちょうど）は受付可能
+      [InlineData(-31, false)]  // その1分前は不可
+      [InlineData(120, true)]   // 終了境界（2時間後ちょうど）は受付可能
+      [InlineData(121, false)]  // その1分後は不可
+      public void 受付可能時間帯は予約時刻の30分前から2時間後までである(
+          int offsetMinutes, bool expected)
+
+  ★実行方法
+      dotnet test
+      dotnet test --filter "FullyQualifiedName~AccessServiceTests"
+
+
+====================================================================
+ 14. ビルド・実行・DB適用のコマンド集
+====================================================================
+
+【ビルド・テスト】
+  dotnet build
+  dotnet test
+  dotnet test --filter "FullyQualifiedName~VisitRulesTests"
+  ※ソリューションは .slnx 形式。VisitorManagement.sln は存在しません。
+
+【実行】
+  dotnet run --project src\VisitorManagement.WinFormsApp
+  dotnet run --project src\VisitorManagement.WebReception
+  dotnet run --project src\VisitorManagement.WebReception --urls http://localhost:5199
+
+【発行（自己完結型）】
+  dotnet publish src\VisitorManagement.WinFormsApp  -p:PublishProfile=SelfContained -c Release
+  dotnet publish src\VisitorManagement.WebReception -p:PublishProfile=SelfContained -c Release
+
+【DBの作成・適用】★-I を必ず付ける
+  sqlcmd -S .\SQLEXPRESS -E -I -i db\00_CreateDatabase_SqlExpress.sql
+  sqlcmd -S .\SQLEXPRESS -E -I -d VisitorMgmt     -i db\01_CreateSchema.sql
+  sqlcmd -S .\SQLEXPRESS -E -I -d VisitorMgmtDemo -i db\01_CreateSchema.sql
+  sqlcmd -S .\SQLEXPRESS -E -I -i db\02_CreateLogin_SqlExpress.sql -v SvcPassword="<パスワード>"
+
+【DBの確認】
+  sqlcmd -S .\SQLEXPRESS -E -I -d VisitorMgmt -W -Q "SELECT COUNT(*) FROM dbo.Visitors;"
+
+【設定値の暗号化（DPAPI）】
+  powershell -ExecutionPolicy Bypass -File scripts\Protect-Secret.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\Protect-Secret.ps1 -Value "ENC:..." -Decrypt
+
+【バッチの実行】
+  VisitorManagement.BatchRunner.exe backup
+  VisitorManagement.BatchRunner.exe log-archive
+  VisitorManagement.BatchRunner.exe log-archive --month 2026-07 --no-delete
+  VisitorManagement.BatchRunner.exe log-archive --only-on-scheduled-day
+
+【バックアップ・タスク登録】
+  powershell -ExecutionPolicy Bypass -File scripts\Backup-VisitorMgmt.ps1 -BackupPath "D:\Backup"
+  powershell -ExecutionPolicy Bypass -File scripts\Register-ScheduledTasks.ps1 -BackupPath "D:\Backup" -BatchRunnerPath "...\VisitorManagement.BatchRunner.exe"
+
+【パッケージの追加】
+  dotnet add src\VisitorManagement.Application package Xxx
+
+
+====================================================================
+ 15. よくある間違い・注意点チェックリスト
+====================================================================
+
+【DB・SQL】
+  □ ★sqlcmd に -I を付けたか
+     → 付けないと Visitors への DDL/DML がエラー1934で失敗する
+  □ INSERT/UPDATE に列を足したとき、パラメータの匿名オブジェクトにも追加したか
+     → 漏れると「スカラー変数 "@Xxx" を宣言してください」エラー
+  □ 日時を UTC で保存しているか（DateTime.UtcNow）
+     → 表示時に HistoryService.ToLocalText でローカルへ変換する
+  □ LIKE検索で EscapeLike を通したか
+  □ トランザクションの境界をサービス層に置いたか
+  □ 複数テーブル更新で session を全 Repository に渡したか
+     → 渡し忘れると別接続になり、同一トランザクションにならない
+
+【業務ルール】
+  □ ★QRトークンを代表者以外に発行していないか
+  □ ★同行者の VisitorEmail に値を入れていないか（必ず null）
+  □ グループ一括更新でキャンセル済みを除外しているか
+  □ 読取回数の更新に TryConsumeAsync を使ったか（同時読取の排他）
+  □ 有効期限の計算を VisitRules 経由にしたか（独自計算しない）
+
+【権限】
+  □ サービス層でも権限判定したか（UIで隠すだけにしていないか）
+  □ APIでも権限判定したか（403を返す）
+  □ 検索に ApplyViewScope を通したか（一般ロールに他人の予約が見えないか）
+
+【WinForms】
+  □ async void のイベントハンドラで try/catch したか
+     → 例外を投げるとアプリが落ちる
+  □ フォームのコンストラクタ引数を IServiceProvider 1つにそろえたか
+     → ShowDialog<TForm>() が Activator.CreateInstance で生成するため
+  □ 権限のない画面を直接開いていないか
+     → LoadAsync 内で PermissionDeniedException → MessageBox となり
+       画面外での自動テストがハングする
+  □ System.Windows.Forms.Application を明示したか
+     → VisitorManagement.Application 名前空間と衝突する
+
+【受付Web】
+  □ PageModel に [Authorize] を付けたか
+  □ JSON POST で antiforgery を明示的に検証したか
+  □ ★Razor は日本語を数値文字参照（&#x53D7; 等）で出力する
+     → HTMLの文字列比較で日本語を判定しない（自動テスト時の落とし穴）
+
+【メール・印刷】
+  □ 送信失敗で業務処理を止めていないか（履歴に記録して続行する）
+  □ QRコードを24bit PNGで生成しているか
+     → 1bitグレースケールPNGは PDFsharp が読めない（Unsupported image format）
+  □ ラベル印刷の失敗で当日受付の登録を失敗させていないか
+
+【設定・運用】
+  □ appsettings.Local.json を .gitignore 対象のままにしているか
+  □ 接続文字列のパスワードを平文でコミットしていないか
+  □ ★BACKUP DATABASE に COMPRESSION を付けていないか
+     → Express Edition では未サポート（エラー1844）。
+       エディションを判定して INIT, CHECKSUM に落とす
+
+【PowerShell（開発作業時）】
+  □ ★Get-Content -Raw → Set-Content の往復で日本語ファイルを壊していないか
+     → PowerShell 5.1 は BOM なし UTF-8 を ANSI として読むため文字化けする。
+       ソース編集はエディタで行うこと
+  □ 日本語コメントを含む .ps1 に BOM を付けたか
+     → BOM なしだと PowerShell 5.1 が文字化けする
+
+
+====================================================================
+ 16. 関連ドキュメントの参照先
+====================================================================
+
+  【設計の正本】
+    来館者記録管理システム_詳細設計書.docx（版数2.7）
+      4章  DB切替アーキテクチャ（本システムの中核）
+      6章  機能仕様
+      9章  データベース設計
+      11章 セキュリティ設計・RBAC権限マトリクス
+      19章 デモシステム仕様
+    AI\VisitorManagementSystem.md（実装指示書。設計書からの抽出版）
+
+  【本リポジトリ内】
+    README.md                     全体像・クイックスタート
+    docs\プログラム構成と役割.txt  ファイル単位の逆引き辞典・編集ガイド
+    docs\編集マニュアル.txt        本書（作業手順書）
+    docs\簡易マニュアル.txt        利用者・導入担当者向け
+    docs\動作検証確認項目.txt      検証チェックリスト
+    docs\導入手順書.md            オンプレ版・クラウド版の導入手順
+    docs\デモ操作手順書.md        営業デモの手順・シナリオ
+    docs\運用マニュアル.md        バックアップ・リストア・DR・アーカイブ
+
+====================================================================

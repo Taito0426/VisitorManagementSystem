@@ -1,0 +1,17 @@
+# ビルド成果物
+bin/
+obj/
+publish/
+*.user
+*.suo
+.vs/
+
+# 開発環境専用の資格情報（設計書 11.3節：接続文字列の平文保存を避ける）
+db/.localdev-credentials.txt
+**/appsettings.Development.json
+**/appsettings.Local.json
+
+# ログ・アーカイブ出力
+LogArchive/
+Backup/
+*.bak

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyTitle>来館者記録管理システム 定時バッチ</AssemblyTitle>
+    <Product>来館者記録管理システム</Product>
+    <Company>Willcode</Company>
+    <RootNamespace>VisitorManagement.BatchRunner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VisitorManagement.Composition\VisitorManagement.Composition.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 管理アプリと同一の設定ファイルを使用する（DB方式・バックアップ・アーカイブ設定を共有） -->
+    <None Include="..\VisitorManagement.WinFormsApp\appsettings.json" Link="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="appsettings.Local.json" Condition="Exists('appsettings.Local.json')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

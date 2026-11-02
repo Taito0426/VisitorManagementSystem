@@ -1,0 +1,29 @@
+@page
+@model LoginModel
+@{
+    ViewData["Title"] = "ログイン";
+}
+
+<div class="card login-card">
+    <h1 class="card__title">受付端末ログイン</h1>
+    <p class="card__description">操作ユーザーのIDとパスワードを入力してください。</p>
+
+    @if (!string.IsNullOrEmpty(Model.ErrorMessage))
+    {
+        <div class="alert alert--error">@Model.ErrorMessage</div>
+    }
+
+    <form method="post">
+        <div class="form-row">
+            <label class="form-row__label" for="LoginId">ログインID</label>
+            <input type="text" id="LoginId" name="LoginId" value="@Model.LoginId" autocomplete="username" autofocus />
+        </div>
+        <div class="form-row">
+            <label class="form-row__label" for="Password">パスワード</label>
+            <input type="password" id="Password" name="Password" autocomplete="current-password" />
+        </div>
+        <div class="button-row">
+            <button type="submit" class="button button--primary">ログイン</button>
+        </div>
+    </form>
+</div>

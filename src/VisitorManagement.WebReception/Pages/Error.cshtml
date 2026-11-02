@@ -1,0 +1,22 @@
+@page
+@model ErrorModel
+@{
+    ViewData["Title"] = "エラー";
+}
+
+<div class="card">
+    <h1 class="card__title">処理を続行できませんでした</h1>
+    <p class="card__description">
+        受付処理中にエラーが発生しました。受付担当者にお申し出ください。<br />
+        An error occurred. Please contact the receptionist.
+    </p>
+
+    @if (!string.IsNullOrEmpty(Model.RequestId))
+    {
+        <p>参照ID / Request ID: <code>@Model.RequestId</code></p>
+    }
+
+    <div class="button-row">
+        <a class="button button--primary" asp-page="/Reception">受付画面へ戻る / Back to Reception</a>
+    </div>
+</div>

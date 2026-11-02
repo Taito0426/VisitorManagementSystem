@@ -1,0 +1,387 @@
+/* 受付端末向けのスタイル。タッチ操作と遠目での視認性を優先し、要素を大きめに配置する。 */
+
+:root {
+    --color-primary: #0b5fa5;
+    --color-primary-dark: #084a80;
+    --color-success: #1b7f3b;
+    --color-error: #b3261e;
+    --color-border: #d3d8de;
+    --color-text: #1f2328;
+    --color-muted: #5c6570;
+    --color-surface: #ffffff;
+    --color-background: #f4f6f8;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: "Meiryo UI", "Segoe UI", "Hiragino Kaku Gothic ProN", sans-serif;
+    color: var(--color-text);
+    background-color: var(--color-background);
+    font-size: 16px;
+    line-height: 1.6;
+}
+
+/* ===== ヘッダー / フッター ===== */
+
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    background-color: var(--color-primary);
+    color: #fff;
+}
+
+.app-header__title {
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.app-header__user {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+}
+
+.app-main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 16px 48px;
+}
+
+.app-footer {
+    padding: 12px 24px;
+    color: var(--color-muted);
+    font-size: 13px;
+    text-align: center;
+}
+
+/* ===== カード ===== */
+
+.card {
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 20px;
+}
+
+.card__title {
+    margin: 0 0 8px;
+    font-size: 22px;
+}
+
+.card__description {
+    margin: 0 0 20px;
+    color: var(--color-muted);
+}
+
+/* ===== フォーム ===== */
+
+.form-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.form-row__label {
+    flex: 0 0 260px;
+    font-weight: bold;
+    font-size: 14px;
+}
+
+.form-row__label .required {
+    color: var(--color-error);
+    margin-left: 4px;
+}
+
+input[type="text"],
+input[type="email"],
+input[type="password"],
+select,
+textarea {
+    flex: 1 1 260px;
+    min-width: 200px;
+    padding: 10px 12px;
+    font-size: 16px;
+    font-family: inherit;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background-color: #fff;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 1px;
+}
+
+/* ===== ボタン ===== */
+
+.button {
+    display: inline-block;
+    padding: 12px 24px;
+    font-size: 16px;
+    font-family: inherit;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background-color: #fff;
+    color: var(--color-text);
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.button:hover {
+    background-color: #eef2f6;
+}
+
+.button--primary {
+    background-color: var(--color-primary);
+    border-color: var(--color-primary);
+    color: #fff;
+    font-weight: bold;
+}
+
+.button--primary:hover {
+    background-color: var(--color-primary-dark);
+}
+
+.button--link {
+    background: none;
+    border: none;
+    color: #fff;
+    text-decoration: underline;
+    padding: 0;
+    font-size: 14px;
+}
+
+.button-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+}
+
+.inline-form {
+    display: inline;
+}
+
+/* ===== 受付画面（QR読取） ===== */
+
+.scan-prompt {
+    font-size: 26px;
+    font-weight: bold;
+    text-align: center;
+    margin: 16px 0;
+}
+
+.scan-hint {
+    text-align: center;
+    color: var(--color-muted);
+    margin-bottom: 20px;
+}
+
+.scan-input {
+    display: block;
+    width: 100%;
+    font-size: 22px;
+    text-align: center;
+    letter-spacing: 2px;
+}
+
+/* 読取結果は大きな文字で表示する（設計書 8.3節） */
+.scan-result {
+    margin-top: 24px;
+    padding: 28px 24px;
+    border-radius: 8px;
+    border: 3px solid var(--color-border);
+    text-align: center;
+}
+
+.scan-result--checkin {
+    border-color: var(--color-success);
+    background-color: #eef8f1;
+}
+
+.scan-result--checkout {
+    border-color: var(--color-primary);
+    background-color: #eef4fa;
+}
+
+.scan-result--error {
+    border-color: var(--color-error);
+    background-color: #fdeeed;
+}
+
+.scan-result__type {
+    font-size: 48px;
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+
+.scan-result__message {
+    font-size: 22px;
+    margin-bottom: 16px;
+}
+
+.scan-result__site {
+    color: var(--color-muted);
+    margin-bottom: 12px;
+}
+
+.scan-result__members {
+    display: inline-block;
+    text-align: left;
+    margin: 0 auto;
+    padding: 0;
+    list-style: none;
+}
+
+.scan-result__members li {
+    font-size: 20px;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--color-border);
+}
+
+.scan-result__members .role {
+    display: inline-block;
+    min-width: 64px;
+    font-size: 13px;
+    color: var(--color-muted);
+    margin-right: 8px;
+}
+
+/* ===== メッセージ ===== */
+
+.alert {
+    padding: 12px 16px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+}
+
+.alert--error {
+    background-color: #fdeeed;
+    border: 1px solid var(--color-error);
+    color: var(--color-error);
+}
+
+.alert--success {
+    background-color: #eef8f1;
+    border: 1px solid var(--color-success);
+    color: var(--color-success);
+}
+
+.alert--info {
+    background-color: #eef4fa;
+    border: 1px solid var(--color-primary);
+    color: var(--color-primary-dark);
+}
+
+/* ===== 同行者テーブル ===== */
+
+.companion-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+}
+
+.companion-table th,
+.companion-table td {
+    border: 1px solid var(--color-border);
+    padding: 8px;
+    text-align: left;
+    font-size: 14px;
+}
+
+.companion-table th {
+    background-color: #eef2f6;
+}
+
+.companion-table input[type="text"] {
+    width: 100%;
+    min-width: 0;
+    padding: 6px 8px;
+    font-size: 15px;
+}
+
+/* ===== QRコード表示 ===== */
+
+.qr-block {
+    text-align: center;
+    margin: 20px 0;
+}
+
+.qr-block img {
+    width: 260px;
+    height: 260px;
+    border: 1px solid var(--color-border);
+    background-color: #fff;
+}
+
+/* ===== ログイン ===== */
+
+.login-card {
+    max-width: 420px;
+    margin: 60px auto;
+}
+
+/* ===== カメラ読取（USB QRリーダーとの併用。設計書 8.3節の拡張） ===== */
+
+.camera {
+    margin-top: 12px;
+}
+
+.camera .button-row {
+    justify-content: center;
+    margin-top: 12px;
+}
+
+.camera__toggle {
+    min-width: 220px;
+}
+
+/* HTTPS でない等でカメラが使えない場合の理由表示 */
+.camera__unavailable {
+    text-align: center;
+    color: var(--color-muted);
+    font-size: 14px;
+    margin: 12px 0 0;
+}
+
+/* プレビュー領域。読取枠を重ねてQRをかざす位置を示す */
+.camera__stage {
+    position: relative;
+    max-width: 480px;
+    margin: 16px auto 0;
+    background-color: #000;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.camera__video {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+.camera__frame {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 60%;
+    aspect-ratio: 1 / 1;
+    transform: translate(-50%, -50%);
+    border: 3px solid var(--color-success);
+    border-radius: 8px;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+}

@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\VisitorManagement.Core\VisitorManagement.Core.csproj" />
+    <ProjectReference Include="..\VisitorManagement.Application\VisitorManagement.Application.csproj" />
+    <ProjectReference Include="..\VisitorManagement.Infrastructure.Data\VisitorManagement.Infrastructure.Data.csproj" />
+    <ProjectReference Include="..\VisitorManagement.Infrastructure.Data.SqlExpress\VisitorManagement.Infrastructure.Data.SqlExpress.csproj" />
+    <ProjectReference Include="..\VisitorManagement.Infrastructure.Data.AzureSql\VisitorManagement.Infrastructure.Data.AzureSql.csproj" />
+    <ProjectReference Include="..\VisitorManagement.Infrastructure.Mail\VisitorManagement.Infrastructure.Mail.csproj" />
+    <ProjectReference Include="..\VisitorManagement.Infrastructure.Printing\VisitorManagement.Infrastructure.Printing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.11" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

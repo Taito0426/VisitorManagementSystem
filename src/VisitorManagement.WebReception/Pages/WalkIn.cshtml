@@ -1,0 +1,204 @@
+@page
+@model WalkInModel
+@{
+    ViewData["Title"] = "当日受付登録";
+}
+@*
+    当日受付登録画面（設計書 8.1節 画面No.9、6.6節・8.4節）。
+    画面表記・入力エラーメッセージは日英併記とする（設計書 6.12節）。
+    文言は Resources/ReceptionTexts.cs に固定実装しており、
+    顧客ごとの調整箇所は「// ★レイアウト調整」コメントで検索できる。
+*@
+
+@if (Model.Result is { } result)
+{
+    <div class="card">
+        <h1 class="card__title">@ReceptionTexts.CompletedTitle</h1>
+        <p class="card__description">@ReceptionTexts.CompletedDescription</p>
+
+        @if (result.CheckedInAt is { } checkedInAt)
+        {
+            @* 当日受付は登録した時点で入館登録まで完了する *@
+            <div class="alert alert--success">
+                @string.Format(ReceptionTexts.CheckedInAtFormat,
+                    VisitorManagement.Application.Services.HistoryService.ToLocalText(checkedInAt))
+            </div>
+        }
+
+        <div class="alert @(result.LabelPrinted ? "alert--success" : "alert--error")">
+            @result.LabelMessage
+        </div>
+
+        @if (result.MailSent)
+        {
+            @* テストモードでは実送信していないことを明示する（デモ版・Debugビルド） *@
+            <div class="alert alert--info">
+                @(result.MailTestMode ? ReceptionTexts.MailTestMode : ReceptionTexts.MailSent)
+            </div>
+        }
+
+        <div class="qr-block">
+            <img src="data:image/png;base64,@result.QrCodeBase64" alt="QR Code" />
+            <p>
+                <strong>@result.RepresentativeName</strong>
+                @if (result.CompanionNames.Count > 0)
+                {
+                    <span> ＋ @string.Join("、", result.CompanionNames)</span>
+                }
+            </p>
+        </div>
+
+        <div class="button-row">
+            <a class="button button--primary" asp-page="/Reception">@ReceptionTexts.ButtonBackToReception</a>
+            @if (result.PdfPreviewAvailable)
+            {
+                @* デモ版：感熱式ラベルプリンタの代わりにA4 PDFでレイアウトを確認する（設計書 19.4節） *@
+                <a class="button"
+                   asp-page-handler="LabelPdf"
+                   asp-route-reservationGroupId="@result.ReservationGroupId"
+                   target="_blank">ラベルレイアウトをPDFで確認 / Preview label as PDF</a>
+            }
+        </div>
+    </div>
+}
+
+<div class="card">
+    <h1 class="card__title">@ReceptionTexts.WalkInTitle</h1>
+    <p class="card__description">@ReceptionTexts.WalkInDescription</p>
+
+    @if (!Model.CanRegister)
+    {
+        <div class="alert alert--error">
+            当日受付登録を行う権限がありません。受付または管理者のアカウントでログインしてください。
+        </div>
+    }
+    else
+    {
+        @if (Model.ErrorMessages.Count > 0)
+        {
+            <div class="alert alert--error">
+                @foreach (var message in Model.ErrorMessages)
+                {
+                    <div>@message</div>
+                }
+            </div>
+        }
+
+        <form method="post">
+            @if (Model.ShowSiteSelector)
+            {
+                <div class="form-row">
+                    <label class="form-row__label" for="SiteId">
+                        @ReceptionTexts.LabelSite<span class="required">*</span>
+                    </label>
+                    <select id="SiteId" name="Input.SiteId">
+                        @foreach (var site in Model.Sites)
+                        {
+                            <option value="@site.SiteId" selected="@(site.SiteId == Model.Input.SiteId)">@site.SiteName</option>
+                        }
+                    </select>
+                </div>
+            }
+            else
+            {
+                @* Entryプラン（1拠点構成）・受付ロールでは拠点選択UIを表示しない（設計書 6.11節） *@
+                <input type="hidden" name="Input.SiteId" value="@Model.Input.SiteId" />
+            }
+
+            <h2>@ReceptionTexts.SectionRepresentative</h2>
+
+            <div class="form-row">
+                <label class="form-row__label" for="CompanyName">@ReceptionTexts.LabelCompanyName</label>
+                <input type="text" id="CompanyName" name="Input.CompanyName" value="@Model.Input.CompanyName" />
+            </div>
+            <div class="form-row">
+                <label class="form-row__label" for="VisitorName">
+                    @ReceptionTexts.LabelVisitorName<span class="required">*</span>
+                </label>
+                <input type="text" id="VisitorName" name="Input.VisitorName" value="@Model.Input.VisitorName" autofocus />
+            </div>
+            <div class="form-row">
+                <label class="form-row__label" for="VisitorNameKana">@ReceptionTexts.LabelVisitorNameKana</label>
+                <input type="text" id="VisitorNameKana" name="Input.VisitorNameKana" value="@Model.Input.VisitorNameKana" />
+            </div>
+            <div class="form-row">
+                <label class="form-row__label" for="Email">@ReceptionTexts.LabelEmail</label>
+                <input type="email" id="Email" name="Input.Email" value="@Model.Input.Email" />
+            </div>
+            <div class="form-row">
+                <label class="form-row__label" for="PhoneNumber">@ReceptionTexts.LabelPhoneNumber</label>
+                <input type="text" id="PhoneNumber" name="Input.PhoneNumber" value="@Model.Input.PhoneNumber" />
+            </div>
+            <div class="form-row">
+                <label class="form-row__label" for="HostEmployeeName">@ReceptionTexts.LabelHostEmployee</label>
+                <input type="text" id="HostEmployeeName" name="Input.HostEmployeeName" value="@Model.Input.HostEmployeeName" />
+            </div>
+            <div class="form-row">
+                <label class="form-row__label" for="PurposeOfVisit">@ReceptionTexts.LabelPurpose</label>
+                <input type="text" id="PurposeOfVisit" name="Input.PurposeOfVisit" value="@Model.Input.PurposeOfVisit" />
+            </div>
+
+            <h2>@ReceptionTexts.SectionCompanions</h2>
+            <p class="card__description">@ReceptionTexts.CompanionNote</p>
+
+            <table class="companion-table">
+                <thead>
+                    <tr>
+                        <th style="width: 45%;">@ReceptionTexts.LabelCompanyName</th>
+                        <th>@ReceptionTexts.LabelVisitorName</th>
+                    </tr>
+                </thead>
+                <tbody id="companion-rows">
+                    @for (var i = 0; i < Model.Input.Companions.Count; i++)
+                    {
+                        <tr>
+                            <td><input type="text" name="Input.Companions[@i].CompanyName" value="@Model.Input.Companions[i].CompanyName" /></td>
+                            <td><input type="text" name="Input.Companions[@i].VisitorName" value="@Model.Input.Companions[i].VisitorName" /></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <button type="button" class="button" id="add-companion">@ReceptionTexts.ButtonAddCompanion</button>
+
+            <div class="button-row">
+                <button type="submit" class="button button--primary">@ReceptionTexts.ButtonSubmit</button>
+                <a class="button" asp-page="/Reception">@ReceptionTexts.ButtonBackToReception</a>
+            </div>
+        </form>
+    }
+</div>
+
+@if (Model.CanRegister)
+{
+    @section Scripts {
+        <script>
+            (function () {
+                // 同行者の入力行を動的に追加する。name 属性の添字はモデルバインドに合わせて連番にする。
+                const tbody = document.getElementById('companion-rows');
+                const addButton = document.getElementById('add-companion');
+                const companyLabel = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(ReceptionTexts.LabelCompanyName));
+
+                addButton.addEventListener('click', function () {
+                    const index = tbody.rows.length;
+                    const row = tbody.insertRow();
+
+                    const companyCell = row.insertCell();
+                    companyCell.appendChild(createInput('Input.Companions[' + index + '].CompanyName'));
+
+                    const nameCell = row.insertCell();
+                    const nameInput = createInput('Input.Companions[' + index + '].VisitorName');
+                    nameCell.appendChild(nameInput);
+                    nameInput.focus();
+                });
+
+                function createInput(name) {
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.name = name;
+                    return input;
+                }
+            })();
+        </script>
+    }
+}

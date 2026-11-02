@@ -1,0 +1,428 @@
+@page
+@model ReceptionModel
+@{
+    ViewData["Title"] = ReceptionResultTexts.ReceptionTitle;
+}
+@*
+    受付画面（設計書 8.1節 画面No.8、8.3節）。
+
+    読取手段は次の2つを併用できる。どちらも同じ /api/access/scan へ送信するため、
+    サーバー側の処理は完全に共通である。
+      ① USB QRリーダー（キーボードエミュレーション方式／HIDモード）
+         フォーカスされたテキストボックスへの入力として受け取り、末尾のEnterで送信する。
+      ② 端末のカメラ（スマホ・タブレット・PCの内蔵カメラ）
+         ブラウザのカメラAPIは HTTPS または localhost でのみ動作するため、
+         セキュアコンテキストでない場合はカメラ読取のUIを表示しない。
+
+    読取結果は大きな文字で表示する。本画面は多言語対応の対象外（日本語表記のみ）とする。
+*@
+
+<div class="card">
+    <h1 class="card__title">@ReceptionResultTexts.ReceptionTitle</h1>
+
+    @if (!Model.CanUseReception)
+    {
+        <div class="alert alert--error">
+            入退館受付を行う権限がありません。受付または管理者のアカウントでログインしてください。
+        </div>
+    }
+    else
+    {
+        <p class="scan-prompt">@ReceptionResultTexts.ScanPrompt</p>
+        <p class="scan-hint">@ReceptionResultTexts.ScanHint</p>
+
+        <input type="text"
+               id="scan-input"
+               class="scan-input"
+               autocomplete="off"
+               autofocus
+               placeholder="QRコードを読み取ってください" />
+
+        @* カメラ読取。利用可否はスクリプト側で判定し、使えない環境では理由を表示する *@
+        <div class="camera">
+            <div class="button-row">
+                <button type="button" id="camera-toggle" class="button button--primary camera__toggle" hidden>
+                    カメラで読み取る
+                </button>
+            </div>
+            <p id="camera-unavailable" class="camera__unavailable" hidden></p>
+            <div id="camera-stage" class="camera__stage" hidden>
+                <video id="camera-video" class="camera__video" playsinline muted></video>
+                <div class="camera__frame"></div>
+            </div>
+        </div>
+
+        <div id="scan-result"></div>
+
+        <div class="button-row">
+            <a class="button" asp-page="/WalkIn">@ReceptionResultTexts.WalkInLink</a>
+        </div>
+    }
+</div>
+
+@if (Model.CanUseReception)
+{
+    @section Scripts {
+        @Html.AntiForgeryToken()
+        @* BarcodeDetector 非対応環境（iOS Safari 等）用のフォールバック。CDNは使わず同梱する *@
+        <script src="~/js/jsQR.js" asp-append-version="true"></script>
+        <script>
+            (function () {
+                const input = document.getElementById('scan-input');
+                const resultArea = document.getElementById('scan-result');
+                const token = document.querySelector('input[name="__RequestVerificationToken"]').value;
+                const deviceInfo = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.DeviceInfo));
+
+                // 結果表示を自動的に消すまでの時間（ミリ秒）
+                const RESULT_TIMEOUT_MS = 15000;
+                let clearTimer = null;
+                let sending = false;
+
+                // QRリーダーはキーボードエミュレーション方式のため、
+                // 入力の最後に送出される Enter をトリガーとして送信する。
+                input.addEventListener('keydown', function (e) {
+                    if (e.key !== 'Enter') {
+                        return;
+                    }
+                    e.preventDefault();
+                    submitScan(input.value, 'スキャナー');
+                });
+
+                // 受付端末では常に入力欄へフォーカスを戻し、かざせばすぐ読み取れる状態を保つ。
+                // ただしカメラ操作用のボタンを押せなくならないよう、ボタン上のクリックは除外する。
+                document.addEventListener('click', function (e) {
+                    if (e.target.closest('button, a, input, select, textarea')) {
+                        return;
+                    }
+                    input.focus();
+                });
+                window.setInterval(function () {
+                    const active = document.activeElement;
+                    if (active !== input && !(active && active.closest('.camera'))) {
+                        input.focus();
+                    }
+                }, 1000);
+
+                async function submitScan(value, source) {
+                    const tokenValue = (value || '').trim();
+                    input.value = '';
+                    if (tokenValue === '' || sending) {
+                        return;
+                    }
+
+                    sending = true;
+                    try {
+                        const response = await fetch('/api/access/scan', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': token
+                            },
+                            // 読取経路を端末情報に付記し、履歴照会でカメラ／スキャナーを区別できるようにする
+                            body: JSON.stringify({
+                                tokenValue: tokenValue,
+                                deviceInfo: deviceInfo + '／' + source
+                            })
+                        });
+
+                        if (!response.ok && response.status !== 400) {
+                            renderError('@ReceptionResultTexts.CommunicationError');
+                            return;
+                        }
+
+                        render(await response.json());
+                    } catch (err) {
+                        renderError('@ReceptionResultTexts.CommunicationError');
+                    } finally {
+                        sending = false;
+                        if (!camera.isRunning()) {
+                            input.focus();
+                        }
+                    }
+                }
+
+                function render(result) {
+                    const styleClass = result.resultType === 'CheckIn' ? 'scan-result--checkin'
+                        : result.resultType === 'CheckOut' ? 'scan-result--checkout'
+                            : 'scan-result--error';
+
+                    let html = '<div class="scan-result ' + styleClass + '">';
+                    html += '<div class="scan-result__type">' + escapeHtml(result.resultTypeText) + '</div>';
+                    html += '<div class="scan-result__message">' + escapeHtml(result.message) + '</div>';
+
+                    if (result.siteName) {
+                        html += '<div class="scan-result__site">来館先: ' + escapeHtml(result.siteName) + '</div>';
+                    }
+
+                    if (result.members && result.members.length > 0) {
+                        html += '<ul class="scan-result__members">';
+                        result.members.forEach(function (m) {
+                            html += '<li><span class="role">' + escapeHtml(m.roleText) + '</span>'
+                                + escapeHtml(m.visitorName)
+                                + (m.companyName ? '（' + escapeHtml(m.companyName) + '）' : '')
+                                + ' → ' + escapeHtml(m.statusText) + '</li>';
+                        });
+                        html += '</ul>';
+                    }
+
+                    html += '</div>';
+                    resultArea.innerHTML = html;
+                    scheduleClear();
+                }
+
+                function renderError(message) {
+                    resultArea.innerHTML = '<div class="scan-result scan-result--error">'
+                        + '<div class="scan-result__type">エラー</div>'
+                        + '<div class="scan-result__message">' + escapeHtml(message) + '</div>'
+                        + '</div>';
+                    scheduleClear();
+                }
+
+                // 次の来館者に前の結果が見えないよう、一定時間で表示を消す
+                function scheduleClear() {
+                    if (clearTimer) {
+                        window.clearTimeout(clearTimer);
+                    }
+                    clearTimer = window.setTimeout(function () { resultArea.innerHTML = ''; }, RESULT_TIMEOUT_MS);
+                }
+
+                function escapeHtml(value) {
+                    if (value === null || value === undefined) {
+                        return '';
+                    }
+                    return String(value)
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+                }
+
+                // ------------------------------------------------------------
+                // カメラ読取（USB QRリーダーと併用できる。設計書 8.3節の拡張）
+                // ------------------------------------------------------------
+                const camera = (function () {
+                    const toggleButton = document.getElementById('camera-toggle');
+                    const unavailable = document.getElementById('camera-unavailable');
+                    const stage = document.getElementById('camera-stage');
+                    const video = document.getElementById('camera-video');
+                    const canvas = document.createElement('canvas');
+
+                    // 同じQRをかざし続けている間の二重送信を防ぐための最短間隔
+                    const DUPLICATE_IGNORE_MS = 4000;
+                    // 復号の試行間隔。短すぎると端末が発熱・電池消費するため間引く
+                    const DECODE_INTERVAL_MS = 200;
+                    // QRが「画角から外れた」と判断するまでの連続未検出フレーム数。
+                    // 手ぶれ・反射で1フレームだけ復号に失敗することがあるため、
+                    // 1回の失敗では外れたとみなさない（かざしっぱなしでの二重送信を防ぐ）
+                    const REARM_MISS_FRAMES = 5;
+
+                    let stream = null;
+                    let detector = null;
+                    let timerId = null;
+                    let lastValue = '';
+                    let lastValueAt = 0;
+                    // 連続してQRを検出できなかったフレーム数
+                    let missCount = REARM_MISS_FRAMES;
+                    let decoding = false;
+
+                    function isSupported() {
+                        return window.isSecureContext
+                            && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+                    }
+
+                    function isRunning() {
+                        return stream !== null;
+                    }
+
+                    function initialize() {
+                        if (!isSupported()) {
+                            // HTTP でLANのIPを直接開いた場合はここに入る。現地で原因が分かるよう理由を出す
+                            unavailable.textContent = window.isSecureContext
+                                ? '※ この端末のブラウザはカメラ読取に対応していません。USB QRリーダーをご利用ください。'
+                                : '※ カメラ読取にはHTTPS接続が必要です。USB QRリーダーをご利用ください。';
+                            unavailable.hidden = false;
+                            return;
+                        }
+
+                        toggleButton.hidden = false;
+                        toggleButton.addEventListener('click', function () {
+                            if (isRunning()) {
+                                stop();
+                            } else {
+                                start();
+                            }
+                        });
+
+                        // 画面を離れる・バックグラウンドへ回るときはカメラを解放する
+                        window.addEventListener('pagehide', stop);
+                        document.addEventListener('visibilitychange', function () {
+                            if (document.hidden) {
+                                stop();
+                            }
+                        });
+                    }
+
+                    async function start() {
+                        toggleButton.disabled = true;
+                        try {
+                            // 背面カメラを優先する（受付スタッフが来館者のQRにかざす想定）
+                            stream = await navigator.mediaDevices.getUserMedia({
+                                video: {
+                                    facingMode: { ideal: 'environment' },
+                                    width: { ideal: 1280 },
+                                    height: { ideal: 720 }
+                                },
+                                audio: false
+                            });
+
+                            video.srcObject = stream;
+
+                            // play() の完了は待たない。映像が届かない端末で待ち続けると
+                            // 停止ボタンも押せない状態のまま固まってしまうため、
+                            // フレームの準備は復号ループ側の readyState 判定に任せる
+                            const playing = video.play();
+                            if (playing && typeof playing.catch === 'function') {
+                                playing.catch(function () { /* 自動再生が拒否されても復号は継続する */ });
+                            }
+
+                            // 標準のバーコード検出APIが使える場合はそちらを使う（高速・省電力）。
+                            // 未対応の場合は同梱の jsQR で復号する。
+                            detector = await createDetector();
+
+                            stage.hidden = false;
+                            toggleButton.textContent = 'カメラを停止';
+                            timerId = window.setInterval(decodeFrame, DECODE_INTERVAL_MS);
+                        } catch (err) {
+                            stop();
+                            renderError(toMessage(err));
+                        } finally {
+                            toggleButton.disabled = false;
+                        }
+                    }
+
+                    function stop() {
+                        if (timerId !== null) {
+                            window.clearInterval(timerId);
+                            timerId = null;
+                        }
+                        if (stream !== null) {
+                            stream.getTracks().forEach(function (t) { t.stop(); });
+                            stream = null;
+                        }
+                        video.srcObject = null;
+                        stage.hidden = true;
+                        toggleButton.textContent = 'カメラで読み取る';
+                        lastValue = '';
+                        missCount = REARM_MISS_FRAMES;
+                        input.focus();
+                    }
+
+                    async function createDetector() {
+                        if (!('BarcodeDetector' in window)) {
+                            return null;
+                        }
+                        try {
+                            const formats = await window.BarcodeDetector.getSupportedFormats();
+                            if (formats.indexOf('qr_code') < 0) {
+                                return null;
+                            }
+                            return new window.BarcodeDetector({ formats: ['qr_code'] });
+                        } catch (err) {
+                            return null;
+                        }
+                    }
+
+                    async function decodeFrame() {
+                        if (decoding || !isRunning() || sending || video.readyState < 2) {
+                            return;
+                        }
+
+                        decoding = true;
+                        try {
+                            const value = detector !== null
+                                ? await detectWithBarcodeDetector()
+                                : detectWithJsQr();
+
+                            if (value) {
+                                accept(value);
+                            } else if (missCount < REARM_MISS_FRAMES) {
+                                // 一定フレーム連続で検出できなければ「画角から外れた」とみなす
+                                missCount++;
+                            }
+                        } catch (err) {
+                            // 1フレームの復号失敗は無視し、次のフレームで再試行する
+                        } finally {
+                            decoding = false;
+                        }
+                    }
+
+                    async function detectWithBarcodeDetector() {
+                        const codes = await detector.detect(video);
+                        return codes.length > 0 ? codes[0].rawValue : '';
+                    }
+
+                    function detectWithJsQr() {
+                        if (typeof window.jsQR !== 'function') {
+                            return '';
+                        }
+
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        if (canvas.width === 0 || canvas.height === 0) {
+                            return '';
+                        }
+
+                        const context = canvas.getContext('2d', { willReadFrequently: true });
+                        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                        const image = context.getImageData(0, 0, canvas.width, canvas.height);
+                        const code = window.jsQR(image.data, image.width, image.height, {
+                            inversionAttempts: 'dontInvert'
+                        });
+
+                        return code ? code.data : '';
+                    }
+
+                    function accept(value) {
+                        const now = Date.now();
+
+                        // 同じQRをかざし続けている間は送信しない。
+                        // 一度画角から外し、かつ一定時間が経ってから再度かざした場合のみ受け付ける
+                        // （かざしっぱなしで「退館済みです」等のエラー履歴が量産されるのを防ぐ）
+                        const leftFrame = missCount >= REARM_MISS_FRAMES;
+                        missCount = 0;
+
+                        if (value === lastValue
+                            && (!leftFrame || (now - lastValueAt) < DUPLICATE_IGNORE_MS)) {
+                            return;
+                        }
+
+                        lastValue = value;
+                        lastValueAt = now;
+
+                        // 読み取れたことが手元で分かるよう軽く振動させる（非対応端末では無視される）
+                        if (navigator.vibrate) {
+                            navigator.vibrate(60);
+                        }
+
+                        submitScan(value, 'カメラ');
+                    }
+
+                    function toMessage(err) {
+                        const name = err && err.name ? err.name : '';
+                        if (name === 'NotAllowedError' || name === 'SecurityError') {
+                            return 'カメラの使用が許可されませんでした。ブラウザの設定でカメラを許可してください。';
+                        }
+                        if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+                            return 'この端末で利用できるカメラが見つかりませんでした。';
+                        }
+                        if (name === 'NotReadableError') {
+                            return 'カメラを起動できませんでした。他のアプリがカメラを使用していないか確認してください。';
+                        }
+                        return 'カメラを起動できませんでした。USB QRリーダーをご利用ください。';
+                    }
+
+                    initialize();
+                    return { isRunning: isRunning };
+                })();
+            })();
+        </script>
+    }
+}

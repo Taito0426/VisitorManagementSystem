@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyTitle>来館者記録管理システム 受付Web</AssemblyTitle>
+    <Product>来館者記録管理システム</Product>
+    <Company>Willcode</Company>
+    <!--
+      設計書 19.2節：デモ版は自己完結型（self-contained）で発行し、
+      組み込みKestrelのみで起動できるようにする（IIS/Azure App Service の設定は不要）。
+        dotnet publish -p:PublishProfile=SelfContained
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VisitorManagement.Composition\VisitorManagement.Composition.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 導入先ごとの上書き設定。存在する場合のみ出力にコピーする（リポジトリには含めない） -->
+    <None Update="appsettings.Local.json" Condition="Exists('appsettings.Local.json')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

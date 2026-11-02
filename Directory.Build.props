@@ -1,0 +1,14 @@
+<Project>
+
+  <!-- 全プロジェクト共通のビルド設定 -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- 日本語コメント・リソースを含むため UTF-8 を明示 -->
+    <NeutralLanguage>ja-JP</NeutralLanguage>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>
